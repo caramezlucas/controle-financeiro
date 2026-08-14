@@ -1660,40 +1660,40 @@ function App() {
         <section className="cards cards-four">
           <article className="card">
             <p>Saldo atual</p>
-            <strong className={dadosGraficos.saldo >= 0 ? "positive" : "negative"}>
-              {formatarValor(dadosGraficos.saldo)}
+            <strong className={totais.saldo >= 0 ? "positive" : "negative"}>
+              {formatarValor(totais.saldo)}
             </strong>
           </article>
 
           <article className="card">
             <p>Total de entradas</p>
             <strong className="positive">
-              {formatarValor(dadosGraficos.totalEntradas)}
+              {formatarValor(totais.totalEntradas)}
             </strong>
           </article>
 
           <article className="card">
             <p>Total de saídas</p>
             <strong className="negative">
-              {formatarValor(dadosGraficos.totalSaidas)}
+              {formatarValor(totais.totalSaidas)}
             </strong>
           </article>
 
           <article className="card">
             <p>Resultado líquido</p>
-            <strong className={dadosGraficos.resultado >= 0 ? "positive" : "negative"}>
-              {formatarValor(dadosGraficos.resultado)}
+            <strong className={totais.saldo >= 0 ? "positive" : "negative"}>
+              {formatarValor(totais.saldo)}
             </strong>
           </article>
 
           <article className="card">
             <p>Contas a receber</p>
-            <strong>{formatarValor(dadosGraficos.totalReceber)}</strong>
+            <strong>{formatarValor(totais.totalReceber)}</strong>
           </article>
 
           <article className="card">
             <p>Contas a pagar</p>
-            <strong>{formatarValor(dadosGraficos.totalPagar)}</strong>
+            <strong>{formatarValor(totais.totalPagar)}</strong>
           </article>
 
           <article className="card">

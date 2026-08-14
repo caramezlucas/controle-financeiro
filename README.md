@@ -1,16 +1,46 @@
-# React + Vite
+# Controle Financeiro
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Aplicação React + Vite para controle financeiro com deploy estático.
 
-Currently, two official plugins are available:
+## Desenvolvimento
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+npm install
+npm run dev
+```
 
-## React Compiler
+## Build de produção
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm run build
+```
 
-## Expanding the ESLint configuration
+O build final fica em `dist/`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## Deploy
+
+### Vercel
+
+- Build command: `npm run build`
+- Output directory: `dist`
+
+### Netlify
+
+- Build command: `npm run build`
+- Publish directory: `dist`
+
+### Outras plataformas estáticas
+
+Use o conteúdo de `dist/` como pasta publicada.
+Se a plataforma suportar SPA fallback, mantenha a regra para redirecionar todas as rotas para `index.html`.
+
+## Variáveis de ambiente
+
+Se for usar o módulo de Supabase em `src/lib/supabase.js`, as variáveis devem ficar na raiz do projeto, em arquivos como `.env.local`:
+
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_PUBLISHABLE_KEY=...
+```
+
+Essas variáveis também precisam ser configuradas no painel da plataforma de deploy.

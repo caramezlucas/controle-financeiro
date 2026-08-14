@@ -41,6 +41,11 @@ const menuItems = [
   { id: "relatorios", label: "Relatórios" },
 ];
 
+const temas = [
+  { id: "executivo", label: "Executivo" },
+  { id: "clean", label: "Clean" },
+];
+
 const lancamentoInicial = {
   descricao: "",
   categoria: "",
@@ -73,6 +78,43 @@ function carregarDados(chave) {
   } catch (erro) {
     console.error("Erro ao carregar dados:", erro);
     return [];
+  }
+}
+
+function carregarFiltrosSalvos(dataAtual) {
+  const filtrosPadrao = {
+    mesSelecionado: String(dataAtual.getMonth()),
+    anoSelecionado: String(dataAtual.getFullYear()),
+    periodoInicio: "",
+    periodoFim: "",
+    filtroCategoria: "",
+    filtroTipo: "all",
+    filtroStatus: "all",
+    busca: "",
+  };
+
+  try {
+    const bruto = localStorage.getItem("controle-financeiro-filtros");
+
+    if (!bruto) {
+      return filtrosPadrao;
+    }
+
+    const filtros = JSON.parse(bruto);
+
+    return {
+      mesSelecionado: String(filtros?.mesSelecionado ?? filtrosPadrao.mesSelecionado),
+      anoSelecionado: String(filtros?.anoSelecionado ?? filtrosPadrao.anoSelecionado),
+      periodoInicio: filtros?.periodoInicio || "",
+      periodoFim: filtros?.periodoFim || "",
+      filtroCategoria: filtros?.filtroCategoria || "",
+      filtroTipo: filtros?.filtroTipo || "all",
+      filtroStatus: filtros?.filtroStatus || "all",
+      busca: filtros?.busca || "",
+    };
+  } catch (erro) {
+    console.error("Erro ao carregar filtros salvos:", erro);
+    return filtrosPadrao;
   }
 }
 
@@ -110,17 +152,18 @@ function obterCategoriasDisponiveis(listas) {
 
 function App() {
   const dataAtual = new Date();
+  const filtrosIniciais = carregarFiltrosSalvos(dataAtual);
 
   const [pagina, setPagina] = useState("dashboard");
   const [mesSelecionado, setMesSelecionado] = useState(
-    String(dataAtual.getMonth())
+    filtrosIniciais.mesSelecionado
   );
   const [anoSelecionado, setAnoSelecionado] = useState(
-    String(dataAtual.getFullYear())
+    filtrosIniciais.anoSelecionado
   );
-  const [periodoInicio, setPeriodoInicio] = useState("");
-  const [periodoFim, setPeriodoFim] = useState("");
-  const [filtroCategoria, setFiltroCategoria] = useState("");
+  const [periodoInicio, setPeriodoInicio] = useState(filtrosIniciais.periodoInicio);
+  const [periodoFim, setPeriodoFim] = useState(filtrosIniciais.periodoFim);
+  const [filtroCategoria, setFiltroCategoria] = useState(filtrosIniciais.filtroCategoria);
 
   const [receitas, setReceitas] = useState(() =>
     carregarDados("controle-financeiro-receitas")
@@ -149,8 +192,8 @@ function App() {
     status: "pendente",
   });
 
-  const [filtroTipo, setFiltroTipo] = useState("all");
-  const [filtroStatus, setFiltroStatus] = useState("all");
+  const [filtroTipo, setFiltroTipo] = useState(filtrosIniciais.filtroTipo);
+  const [filtroStatus, setFiltroStatus] = useState(filtrosIniciais.filtroStatus);
   const [orcamentos, setOrcamentos] = useState(() =>
     carregarDados("controle-financeiro-orcamentos")
   );
@@ -160,7 +203,21 @@ function App() {
     ano: String(dataAtual.getFullYear()),
     mes: String(dataAtual.getMonth()),
   });
-  const [busca, setBusca] = useState("");
+  const [busca, setBusca] = useState(filtrosIniciais.busca);
+  const [edicaoReceitaId, setEdicaoReceitaId] = useState(null);
+  const [edicaoDespesaId, setEdicaoDespesaId] = useState(null);
+  const [edicaoPagarId, setEdicaoPagarId] = useState(null);
+  const [edicaoReceberId, setEdicaoReceberId] = useState(null);
+  const [edicaoOrcamentoId, setEdicaoOrcamentoId] = useState(null);
+  const [tema, setTema] = useState(() => {
+    const temaSalvo = localStorage.getItem("controle-financeiro-tema");
+
+    if (temaSalvo === "clean" || temaSalvo === "executivo") {
+      return temaSalvo;
+    }
+
+    return "executivo";
+  });
 
   useEffect(() => {
     localStorage.setItem(
@@ -196,6 +253,36 @@ function App() {
       JSON.stringify(orcamentos)
     );
   }, [orcamentos]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", tema);
+    localStorage.setItem("controle-financeiro-tema", tema);
+  }, [tema]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      "controle-financeiro-filtros",
+      JSON.stringify({
+        mesSelecionado,
+        anoSelecionado,
+        periodoInicio,
+        periodoFim,
+        filtroCategoria,
+        filtroTipo,
+        filtroStatus,
+        busca,
+      })
+    );
+  }, [
+    mesSelecionado,
+    anoSelecionado,
+    periodoInicio,
+    periodoFim,
+    filtroCategoria,
+    filtroTipo,
+    filtroStatus,
+    busca,
+  ]);
 
   const anosDisponiveis = useMemo(() => {
     const anos = obterAnosDisponiveis([
@@ -374,11 +461,16 @@ function App() {
 
     const totalReceitas = somar(receitasPagas);
     const totalDespesas = somar(despesasPagas);
+    const totalEntradas = totalReceitas + somar(contasReceberPendentes);
+    const totalSaidas = totalDespesas + somar(contasPagarPendentes);
+    const saldoAtual = totalEntradas - totalSaidas;
 
     return {
       totalReceitas,
       totalDespesas,
-      saldo: totalReceitas - totalDespesas,
+      totalEntradas,
+      totalSaidas,
+      saldo: saldoAtual,
       totalPagar: somar(contasPagarPendentes),
       totalReceber: somar(contasReceberPendentes),
     };
@@ -744,6 +836,8 @@ function App() {
     formulario,
     setLista,
     setFormulario,
+    idEdicao,
+    setIdEdicao,
     tipo,
   }) {
     evento.preventDefault();
@@ -758,14 +852,46 @@ function App() {
       return;
     }
 
-    const novoLancamento = {
-      id: Date.now(),
+    const lancamento = {
+      id: idEdicao || Date.now(),
       tipo,
       ...formulario,
     };
 
-    setLista((listaAnterior) => [...listaAnterior, novoLancamento]);
+    if (idEdicao) {
+      setLista((listaAnterior) =>
+        listaAnterior.map((item) =>
+          item.id === idEdicao ? lancamento : item
+        )
+      );
+      setIdEdicao(null);
+    } else {
+      setLista((listaAnterior) => [...listaAnterior, lancamento]);
+    }
 
+    setFormulario({
+      ...lancamentoInicial,
+      status:
+        tipo === "conta-pagar" || tipo === "conta-receber"
+          ? "pendente"
+          : "pago",
+    });
+  }
+
+  function iniciarEdicaoLancamento(item, setFormulario, setIdEdicao) {
+    setFormulario({
+      descricao: item.descricao || "",
+      categoria: item.categoria || "",
+      valor: item.valor || "",
+      data: item.data || new Date().toISOString().slice(0, 10),
+      status: item.status || "pago",
+      observacoes: item.observacoes || "",
+    });
+    setIdEdicao(item.id);
+  }
+
+  function cancelarEdicaoLancamento(setFormulario, setIdEdicao, tipo) {
+    setIdEdicao(null);
     setFormulario({
       ...lancamentoInicial,
       status:
@@ -816,15 +942,45 @@ function App() {
       return;
     }
 
-    const novoOrcamento = {
-      id: Date.now(),
+    const orcamento = {
+      id: edicaoOrcamentoId || Date.now(),
       categoria: formOrcamento.categoria.trim(),
       valor: Number(formOrcamento.valor),
       ano: formOrcamento.ano,
       mes: formOrcamento.mes,
     };
 
-    setOrcamentos((listaAnterior) => [...listaAnterior, novoOrcamento]);
+    if (edicaoOrcamentoId) {
+      setOrcamentos((listaAnterior) =>
+        listaAnterior.map((item) =>
+          item.id === edicaoOrcamentoId ? orcamento : item
+        )
+      );
+      setEdicaoOrcamentoId(null);
+    } else {
+      setOrcamentos((listaAnterior) => [...listaAnterior, orcamento]);
+    }
+
+    setFormOrcamento({
+      categoria: "",
+      valor: "",
+      ano: String(dataAtual.getFullYear()),
+      mes: String(dataAtual.getMonth()),
+    });
+  }
+
+  function editarOrcamento(item) {
+    setEdicaoOrcamentoId(item.id);
+    setFormOrcamento({
+      categoria: item.categoria || "",
+      valor: item.valor || "",
+      ano: item.ano || String(dataAtual.getFullYear()),
+      mes: item.mes || String(dataAtual.getMonth()),
+    });
+  }
+
+  function cancelarEdicaoOrcamento() {
+    setEdicaoOrcamentoId(null);
     setFormOrcamento({
       categoria: "",
       valor: "",
@@ -1199,8 +1355,11 @@ function App() {
     formulario,
     setFormulario,
     setLista,
+    idEdicao,
+    setIdEdicao,
     tipo,
     textoBotao,
+    textoBotaoEditar,
   }) {
     return (
       <section className="panel form-panel">
@@ -1218,6 +1377,8 @@ function App() {
               formulario,
               setLista,
               setFormulario,
+              idEdicao,
+              setIdEdicao,
               tipo,
             })
           }
@@ -1289,15 +1450,33 @@ function App() {
             />
           </div>
 
-          <button className="primary-button form-button" type="submit">
-            {textoBotao}
-          </button>
+          <div className="form-actions">
+            <button className="primary-button form-button" type="submit">
+              {idEdicao ? textoBotaoEditar : textoBotao}
+            </button>
+
+            {idEdicao && (
+              <button
+                className="secondary-button form-button"
+                type="button"
+                onClick={() =>
+                  cancelarEdicaoLancamento(
+                    setFormulario,
+                    setIdEdicao,
+                    tipo
+                  )
+                }
+              >
+                Cancelar edição
+              </button>
+            )}
+          </div>
         </form>
       </section>
     );
   }
 
-  function renderLista({ titulo, subtitulo, lista, setLista }) {
+  function renderLista({ titulo, subtitulo, lista, setLista, onEditar }) {
     const itensFiltrados = filtrarLista(lista);
 
     return (
@@ -1347,9 +1526,16 @@ function App() {
                   <button
                     className="secondary-button small-button"
                     type="button"
+                    onClick={() => onEditar(item)}
+                  >
+                    Editar
+                  </button>
+                  <button
+                    className="secondary-button small-button"
+                    type="button"
                     onClick={() => alternarStatus(setLista, item.id)}
                   >
-                    Alterar
+                    Status
                   </button>
                   <button
                     className="delete-button"
@@ -1375,12 +1561,11 @@ function App() {
     const ultimosLancamentos = [
       ...receitas.map((item) => ({ ...item, origem: "Receita" })),
       ...despesas.map((item) => ({ ...item, origem: "Despesa" })),
+      ...contasReceber.map((item) => ({ ...item, origem: "Conta a receber" })),
+      ...contasPagar.map((item) => ({ ...item, origem: "Conta a pagar" })),
     ]
       .sort((a, b) => b.id - a.id)
       .slice(0, 5);
-
-    const saldoProjetado =
-      dadosGraficos.saldo + dadosGraficos.totalReceber - dadosGraficos.totalPagar;
 
     function renderDashboardAlerts() {
       const alertas = [];
@@ -1481,16 +1666,16 @@ function App() {
           </article>
 
           <article className="card">
-            <p>Total de receitas</p>
+            <p>Total de entradas</p>
             <strong className="positive">
-              {formatarValor(dadosGraficos.totalReceitas)}
+              {formatarValor(dadosGraficos.totalEntradas)}
             </strong>
           </article>
 
           <article className="card">
-            <p>Total de despesas</p>
+            <p>Total de saídas</p>
             <strong className="negative">
-              {formatarValor(dadosGraficos.totalDespesas)}
+              {formatarValor(dadosGraficos.totalSaidas)}
             </strong>
           </article>
 
@@ -1619,6 +1804,32 @@ function App() {
     const resultado = totalReceitasPagas - totalDespesasPagas;
     const margem = totalReceitasPagas > 0 ? (resultado / totalReceitasPagas) * 100 : 0;
     const relatorioData = formatarData(new Date().toISOString().slice(0, 10));
+    const despesasPorCategoriaRelatorio = Object.entries(
+      despesasFiltradas.reduce((acumulador, item) => {
+        const categoria = item.categoria?.trim() || "Sem categoria";
+        acumulador[categoria] = (acumulador[categoria] || 0) + Number(item.valor || 0);
+        return acumulador;
+      }, {})
+    )
+      .map(([categoria, valor]) => ({ categoria, valor }))
+      .sort((a, b) => b.valor - a.valor);
+    const topCategoriasDespesas = despesasPorCategoriaRelatorio.slice(0, 5);
+    const totalOutrasCategoriasDespesas = despesasPorCategoriaRelatorio
+      .slice(5)
+      .reduce((total, item) => total + item.valor, 0);
+    const topicosDespesasRelatorio = totalOutrasCategoriasDespesas > 0
+      ? [
+          ...topCategoriasDespesas,
+          {
+            categoria: "Outras categorias",
+            valor: totalOutrasCategoriasDespesas,
+          },
+        ]
+      : topCategoriasDespesas;
+    const totalDespesasPorCategoriaRelatorio = despesasPorCategoriaRelatorio.reduce(
+      (total, item) => total + item.valor,
+      0
+    );
 
     return (
       <>
@@ -1709,6 +1920,34 @@ function App() {
             categorias e status aplicados. Use o botão acima para exportar em PDF e compartilhar com
             stakeholders.
           </p>
+        </section>
+
+        <section className="panel report-categories">
+          <div className="section-heading">
+            <div>
+              <p className="subtitle">Despesas</p>
+              <h2>Tópicos por categoria</h2>
+            </div>
+          </div>
+
+          {despesasPorCategoriaRelatorio.length === 0 ? (
+            <div className="empty-state">
+              <strong>Nenhuma despesa encontrada no período</strong>
+              <p>Altere os filtros para visualizar os tópicos por categoria.</p>
+            </div>
+          ) : (
+            <ul className="report-topics">
+              {topicosDespesasRelatorio.map((item) => (
+                <li key={item.categoria}>
+                  <div>
+                    <strong>{item.categoria}</strong>
+                    <span>{formatarPercentual(item.valor, totalDespesasPorCategoriaRelatorio)} do total</span>
+                  </div>
+                  <strong className="negative">{formatarValor(item.valor)}</strong>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       </>
     );
@@ -1976,9 +2215,21 @@ function App() {
             </label>
           </div>
 
-          <button className="primary-button form-button" type="button" onClick={salvarOrcamento}>
-            Salvar orçamento
-          </button>
+          <div className="form-actions">
+            <button className="primary-button form-button" type="button" onClick={salvarOrcamento}>
+              {edicaoOrcamentoId ? "Atualizar orçamento" : "Salvar orçamento"}
+            </button>
+
+            {edicaoOrcamentoId && (
+              <button
+                className="secondary-button form-button"
+                type="button"
+                onClick={cancelarEdicaoOrcamento}
+              >
+                Cancelar edição
+              </button>
+            )}
+          </div>
 
           {dadosGraficos.orcamentosVisiveis.length === 0 ? (
             <div className="empty-state" style={{ marginTop: 24 }}>
@@ -2003,13 +2254,22 @@ function App() {
                       style={{ width: `${Math.min(item.percentual, 100)}%` }}
                     />
                   </div>
-                  <button
-                    className="delete-button small-button"
-                    type="button"
-                    onClick={() => excluirOrcamento(item.id)}
-                  >
-                    Excluir
-                  </button>
+                  <div className="budget-actions">
+                    <button
+                      className="secondary-button small-button"
+                      type="button"
+                      onClick={() => editarOrcamento(item)}
+                    >
+                      Editar
+                    </button>
+                    <button
+                      className="delete-button small-button"
+                      type="button"
+                      onClick={() => excluirOrcamento(item.id)}
+                    >
+                      Excluir
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -2036,8 +2296,11 @@ function App() {
             formulario: formReceita,
             setFormulario: setFormReceita,
             setLista: setReceitas,
+            idEdicao: edicaoReceitaId,
+            setIdEdicao: setEdicaoReceitaId,
             tipo: "receita",
             textoBotao: "Salvar receita",
+            textoBotaoEditar: "Atualizar receita",
           })}
 
           {renderLista({
@@ -2045,6 +2308,12 @@ function App() {
             subtitulo: "Histórico",
             lista: receitas,
             setLista: setReceitas,
+            onEditar: (item) =>
+              iniciarEdicaoLancamento(
+                item,
+                setFormReceita,
+                setEdicaoReceitaId
+              ),
           })}
         </>
       );
@@ -2066,8 +2335,11 @@ function App() {
             formulario: formDespesa,
             setFormulario: setFormDespesa,
             setLista: setDespesas,
+            idEdicao: edicaoDespesaId,
+            setIdEdicao: setEdicaoDespesaId,
             tipo: "despesa",
             textoBotao: "Salvar despesa",
+            textoBotaoEditar: "Atualizar despesa",
           })}
 
           {renderLista({
@@ -2075,6 +2347,12 @@ function App() {
             subtitulo: "Histórico",
             lista: despesas,
             setLista: setDespesas,
+            onEditar: (item) =>
+              iniciarEdicaoLancamento(
+                item,
+                setFormDespesa,
+                setEdicaoDespesaId
+              ),
           })}
         </>
       );
@@ -2096,8 +2374,11 @@ function App() {
             formulario: formPagar,
             setFormulario: setFormPagar,
             setLista: setContasPagar,
+            idEdicao: edicaoPagarId,
+            setIdEdicao: setEdicaoPagarId,
             tipo: "conta-pagar",
             textoBotao: "Salvar conta a pagar",
+            textoBotaoEditar: "Atualizar conta",
           })}
 
           {renderLista({
@@ -2105,6 +2386,12 @@ function App() {
             subtitulo: "Controle",
             lista: contasPagar,
             setLista: setContasPagar,
+            onEditar: (item) =>
+              iniciarEdicaoLancamento(
+                item,
+                setFormPagar,
+                setEdicaoPagarId
+              ),
           })}
         </>
       );
@@ -2126,8 +2413,11 @@ function App() {
             formulario: formReceber,
             setFormulario: setFormReceber,
             setLista: setContasReceber,
+            idEdicao: edicaoReceberId,
+            setIdEdicao: setEdicaoReceberId,
             tipo: "conta-receber",
             textoBotao: "Salvar conta a receber",
+            textoBotaoEditar: "Atualizar recebimento",
           })}
 
           {renderLista({
@@ -2135,6 +2425,12 @@ function App() {
             subtitulo: "Controle",
             lista: contasReceber,
             setLista: setContasReceber,
+            onEditar: (item) =>
+              iniciarEdicaoLancamento(
+                item,
+                setFormReceber,
+                setEdicaoReceberId
+              ),
           })}
         </>
       );
@@ -2152,7 +2448,7 @@ function App() {
   }
 
   return (
-    <div className="app">
+    <div className={`app theme-${tema}`}>
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-logo">CF</div>
@@ -2179,6 +2475,22 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
+          <div className="theme-switcher">
+            <span className="theme-title">Tema visual</span>
+            <div className="theme-options">
+              {temas.map((opcao) => (
+                <button
+                  key={opcao.id}
+                  type="button"
+                  className={tema === opcao.id ? "active" : ""}
+                  onClick={() => setTema(opcao.id)}
+                >
+                  {opcao.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
           <strong>Versão 1.0</strong>
           <span>Dados salvos automaticamente</span>
         </div>

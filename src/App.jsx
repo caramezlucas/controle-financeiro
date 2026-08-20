@@ -443,19 +443,25 @@ function App() {
       );
     }
 
-    const receitasPagas = receitas.filter(
+    // aplica os mesmos filtros de mês/ano/período/tipo/status/categoria usados no restante do app
+    const receitasFiltradas = receitas.filter(itemEstaNoFiltro);
+    const despesasFiltradas = despesas.filter(itemEstaNoFiltro);
+    const contasPagarFiltradas = contasPagar.filter(itemEstaNoFiltro);
+    const contasReceberFiltradas = contasReceber.filter(itemEstaNoFiltro);
+
+    const receitasPagas = receitasFiltradas.filter(
       (item) => item.status === "pago"
     );
 
-    const despesasPagas = despesas.filter(
+    const despesasPagas = despesasFiltradas.filter(
       (item) => item.status === "pago"
     );
 
-    const contasPagarPendentes = contasPagar.filter(
+    const contasPagarPendentes = contasPagarFiltradas.filter(
       (item) => item.status === "pendente"
     );
 
-    const contasReceberPendentes = contasReceber.filter(
+    const contasReceberPendentes = contasReceberFiltradas.filter(
       (item) => item.status === "pendente"
     );
 
@@ -474,7 +480,19 @@ function App() {
       totalPagar: somar(contasPagarPendentes),
       totalReceber: somar(contasReceberPendentes),
     };
-  }, [receitas, despesas, contasPagar, contasReceber]);
+  }, [
+    receitas,
+    despesas,
+    contasPagar,
+    contasReceber,
+    anoSelecionado,
+    mesSelecionado,
+    periodoInicio,
+    periodoFim,
+    filtroCategoria,
+    filtroStatus,
+    filtroTipo,
+  ]);
 
   const dadosGraficos = useMemo(() => {
     const filtrarLista = (lista) => lista.filter(itemEstaNoFiltro);
@@ -811,6 +829,7 @@ function App() {
     despesas,
     contasPagar,
     contasReceber,
+    orcamentos,
     anoSelecionado,
     mesSelecionado,
     periodoInicio,

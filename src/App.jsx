@@ -1,4 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import {
+  doc,
+  getDoc,
+  serverTimestamp,
+  setDoc,
+} from "firebase/firestore";
 import {
   Area,
   AreaChart,
@@ -16,7 +23,7 @@ import {
 } from "recharts";
 import "./App.css";
 import AuthScreen from "./AuthScreen.jsx";
-import { supabase } from "./lib/supabase.js";
+import { auth, db } from "./firebase.js";
 
 const meses = [
   "Janeiro",
@@ -67,21 +74,6 @@ const piColors = [
   "#f43f5e",
   "#a855f7",
 ];
-
-function carregarDados(chave) {
-  try {
-    const dadosSalvos = localStorage.getItem(chave);
-
-    if (dadosSalvos) {
-      return JSON.parse(dadosSalvos);
-    }
-
-    return [];
-  } catch (erro) {
-    console.error("Erro ao carregar dados:", erro);
-    return [];
-  }
-}
 
 function carregarFiltrosSalvos(dataAtual) {
   const filtrosPadrao = {
@@ -152,42 +144,47 @@ function obterCategoriasDisponiveis(listas) {
   );
 }
 
-const chavesDadosFinanceiros = {
-  receitas: "controle-financeiro-receitas",
-  despesas: "controle-financeiro-despesas",
-  contasPagar: "controle-financeiro-contas-pagar",
-  contasReceber: "controle-financeiro-contas-receber",
-  orcamentos: "controle-financeiro-orcamentos",
-};
-
-function carregarDadosFinanceirosLocais() {
-  return Object.fromEntries(
-    Object.entries(chavesDadosFinanceiros).map(([nome, chave]) => [
-      nome,
-      carregarDados(chave),
-    ])
-  );
-}
-
 function normalizarDadosFinanceiros(dados = {}) {
   return Object.fromEntries(
-    Object.keys(chavesDadosFinanceiros).map((nome) => [
+    ["receitas", "despesas", "contasPagar", "contasReceber", "orcamentos"].map((nome) => [
       nome,
       Array.isArray(dados[nome]) ? dados[nome] : [],
     ])
   );
 }
 
+function chaveCacheFinanceiro(userId) {
+  return `controle-financeiro-cache-${userId}`;
+}
+
+function carregarCacheFinanceiro(userId) {
+  try {
+    const bruto = localStorage.getItem(chaveCacheFinanceiro(userId));
+    return bruto ? normalizarDadosFinanceiros(JSON.parse(bruto)) : null;
+  } catch (erro) {
+    console.error("Erro ao carregar cache financeiro:", erro);
+    return null;
+  }
+}
+
+function salvarCacheFinanceiro(userId, dados) {
+  try {
+    localStorage.setItem(chaveCacheFinanceiro(userId), JSON.stringify(dados));
+  } catch (erro) {
+    console.error("Erro ao salvar cache financeiro:", erro);
+  }
+}
+
 function App() {
   const dataAtual = new Date();
   const filtrosIniciais = carregarFiltrosSalvos(dataAtual);
-  const [session, setSession] = useState(null);
-  const [authLoading, setAuthLoading] = useState(Boolean(supabase));
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [dataReady, setDataReady] = useState(false);
   const [dataOwnerId, setDataOwnerId] = useState(null);
   const [dataLoadingError, setDataLoadingError] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
-  const [syncStatus, setSyncStatus] = useState("synced");
+  const [syncStatus, setSyncStatus] = useState("local");
   const [syncError, setSyncError] = useState("");
   const saveQueue = useRef(Promise.resolve());
 
@@ -202,21 +199,10 @@ function App() {
   const [periodoFim, setPeriodoFim] = useState(filtrosIniciais.periodoFim);
   const [filtroCategoria, setFiltroCategoria] = useState(filtrosIniciais.filtroCategoria);
 
-  const [receitas, setReceitas] = useState(() =>
-    carregarDados("controle-financeiro-receitas")
-  );
-
-  const [despesas, setDespesas] = useState(() =>
-    carregarDados("controle-financeiro-despesas")
-  );
-
-  const [contasPagar, setContasPagar] = useState(() =>
-    carregarDados("controle-financeiro-contas-pagar")
-  );
-
-  const [contasReceber, setContasReceber] = useState(() =>
-    carregarDados("controle-financeiro-contas-receber")
-  );
+  const [receitas, setReceitas] = useState([]);
+  const [despesas, setDespesas] = useState([]);
+  const [contasPagar, setContasPagar] = useState([]);
+  const [contasReceber, setContasReceber] = useState([]);
 
   const [formReceita, setFormReceita] = useState(lancamentoInicial);
   const [formDespesa, setFormDespesa] = useState(lancamentoInicial);
@@ -231,9 +217,7 @@ function App() {
 
   const [filtroTipo, setFiltroTipo] = useState(filtrosIniciais.filtroTipo);
   const [filtroStatus, setFiltroStatus] = useState(filtrosIniciais.filtroStatus);
-  const [orcamentos, setOrcamentos] = useState(() =>
-    carregarDados("controle-financeiro-orcamentos")
-  );
+  const [orcamentos, setOrcamentos] = useState([]);
   const [formOrcamento, setFormOrcamento] = useState({
     categoria: "",
     valor: "",
@@ -257,85 +241,33 @@ function App() {
   });
 
   useEffect(() => {
-    if (!supabase) {
-      return undefined;
-    }
-
-    let active = true;
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
+    return onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
+      setDataReady(false);
+      setDataOwnerId(null);
+      setDataLoadingError("");
+      setSyncError("");
+      setSyncStatus(nextUser ? "syncing" : "local");
+      setReceitas([]);
+      setDespesas([]);
+      setContasPagar([]);
+      setContasReceber([]);
+      setOrcamentos([]);
       setAuthLoading(false);
     });
-
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (!active) return;
-      if (error) setDataLoadingError(error.message);
-      setSession(data.session);
-      setAuthLoading(false);
-    });
-
-    return () => {
-      active = false;
-      subscription.unsubscribe();
-    };
   }, []);
 
   useEffect(() => {
-    const userId = session?.user?.id;
+    const userId = user?.uid;
 
-    if (!supabase || !userId) {
+    if (!userId) {
       return undefined;
     }
 
     let active = true;
 
     async function carregarDadosDaConta() {
-      try {
-        const { data: registro, error } = await supabase
-          .from("financial_data")
-          .select("data")
-          .eq("user_id", userId)
-          .maybeSingle();
-
-        if (error) throw error;
-
-        let dados = normalizarDadosFinanceiros(registro?.data);
-
-        if (!registro) {
-          const migracaoRealizada =
-            localStorage.getItem("controle-financeiro-migracao-cloud") === "true";
-
-          if (!migracaoRealizada) {
-            const dadosLocais = normalizarDadosFinanceiros(
-              carregarDadosFinanceirosLocais()
-            );
-            const existeDadoLocal = Object.values(dadosLocais).some(
-              (lista) => lista.length > 0
-            );
-
-            if (
-              existeDadoLocal &&
-              window.confirm(
-                "Esta conta ainda não tem dados. Deseja importar os lançamentos salvos neste aparelho?"
-              )
-            ) {
-              dados = dadosLocais;
-            }
-          }
-
-          const { error: saveError } = await supabase
-            .from("financial_data")
-            .upsert({ user_id: userId, data: dados }, { onConflict: "user_id" });
-
-          if (saveError) throw saveError;
-        }
-
-        if (!active) return;
-
-        localStorage.setItem("controle-financeiro-migracao-cloud", "true");
-        setDataLoadingError("");
+      function aplicarDados(dados) {
         setReceitas(dados.receitas);
         setDespesas(dados.despesas);
         setContasPagar(dados.contasPagar);
@@ -343,8 +275,43 @@ function App() {
         setOrcamentos(dados.orcamentos);
         setDataOwnerId(userId);
         setDataReady(true);
+      }
+
+      try {
+        const referencia = doc(db, "financial_data", userId);
+        const registro = await getDoc(referencia);
+        if (!active) return;
+
+        let dados;
+        if (registro.exists()) {
+          dados = normalizarDadosFinanceiros(registro.data());
+        } else {
+          dados = normalizarDadosFinanceiros();
+          await setDoc(referencia, {
+            ...dados,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        if (!active) return;
+
+        salvarCacheFinanceiro(userId, dados);
+        aplicarDados(dados);
+        setSyncStatus("synced");
       } catch (error) {
-        if (active) setDataLoadingError(error.message || "Erro ao carregar seus dados.");
+        if (!active) return;
+
+        const dadosEmCache = carregarCacheFinanceiro(userId);
+        if (dadosEmCache) {
+          aplicarDados(dadosEmCache);
+          setDataLoadingError("");
+          setSyncStatus("error");
+          setSyncError("Firestore indisponível. Exibindo o cache deste usuário.");
+        } else {
+          setDataLoadingError(error.message || "Erro ao carregar seus dados.");
+          setSyncStatus("error");
+          setSyncError("Não foi possível acessar os dados no Firestore.");
+        }
       }
     }
 
@@ -353,12 +320,12 @@ function App() {
     return () => {
       active = false;
     };
-  }, [session?.user?.id, loadAttempt]);
+  }, [user?.uid, loadAttempt]);
 
   useEffect(() => {
-    const userId = session?.user?.id;
+    const userId = user?.uid;
 
-    if (!supabase || !userId || !dataReady || dataOwnerId !== userId) {
+    if (!userId || !dataReady || dataOwnerId !== userId) {
       return undefined;
     }
 
@@ -370,6 +337,7 @@ function App() {
       contasReceber,
       orcamentos,
     });
+    salvarCacheFinanceiro(userId, dados);
 
     const timer = window.setTimeout(() => {
       setSyncStatus("syncing");
@@ -377,11 +345,10 @@ function App() {
       saveQueue.current = saveQueue.current
         .catch(() => {})
         .then(async () => {
-          const { error } = await supabase
-            .from("financial_data")
-            .upsert({ user_id: userId, data: dados }, { onConflict: "user_id" });
-
-          if (error) throw error;
+          await setDoc(doc(db, "financial_data", userId), {
+            ...dados,
+            updatedAt: serverTimestamp(),
+          });
         })
         .then(() => {
           if (active) setSyncStatus("synced");
@@ -398,7 +365,7 @@ function App() {
       window.clearTimeout(timer);
     };
   }, [
-    session?.user?.id,
+    user?.uid,
     dataReady,
     dataOwnerId,
     receitas,
@@ -407,41 +374,6 @@ function App() {
     contasReceber,
     orcamentos,
   ]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "controle-financeiro-receitas",
-      JSON.stringify(receitas)
-    );
-  }, [receitas]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "controle-financeiro-despesas",
-      JSON.stringify(despesas)
-    );
-  }, [despesas]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "controle-financeiro-contas-pagar",
-      JSON.stringify(contasPagar)
-    );
-  }, [contasPagar]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "controle-financeiro-contas-receber",
-      JSON.stringify(contasReceber)
-    );
-  }, [contasReceber]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      "controle-financeiro-orcamentos",
-      JSON.stringify(orcamentos)
-    );
-  }, [orcamentos]);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", tema);
@@ -2706,11 +2638,11 @@ function App() {
     );
   }
 
-  if (!session) {
-    return <AuthScreen supabase={supabase} />;
+  if (!user) {
+    return <AuthScreen />;
   }
 
-  if (!dataReady || dataOwnerId !== session.user.id) {
+  if (!dataReady || dataOwnerId !== user.uid) {
     return (
       <main className="auth-shell">
         <section className="auth-panel">
@@ -2732,7 +2664,7 @@ function App() {
             <button
               className="auth-mode-toggle"
               type="button"
-              onClick={() => supabase.auth.signOut()}
+              onClick={() => signOut(auth)}
             >
               Sair da conta
             </button>
@@ -2788,23 +2720,25 @@ function App() {
 
           <strong>Versão 1.0</strong>
           <div className="account-panel">
-            <span className="account-email" title={session.user.email}>
-              {session.user.email}
+            <span className="account-email" title={user.email || ""}>
+              {user.email}
             </span>
             <span
               className={`sync-label sync-${syncStatus}`}
-              title={syncError || "Dados sincronizados com sua conta"}
+              title={syncError || (syncStatus === "local" ? "Dados salvos neste aparelho" : "Dados sincronizados com sua conta")}
             >
               {syncStatus === "syncing"
                 ? "Sincronizando..."
                 : syncStatus === "error"
                   ? "Falha na sincronização"
-                  : "Sincronizado na nuvem"}
+                  : syncStatus === "local"
+                    ? "Salvo neste aparelho"
+                    : "Sincronizado na nuvem"}
             </span>
             <button
               className="account-signout"
               type="button"
-              onClick={() => supabase.auth.signOut()}
+              onClick={() => signOut(auth)}
             >
               Sair
             </button>

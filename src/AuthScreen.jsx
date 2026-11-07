@@ -1,7 +1,21 @@
 import { useState } from "react";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+} from "firebase/auth";
+import { auth } from "./firebase.js";
 import "./AuthScreen.css";
 
-function AuthScreen({ supabase, message = "" }) {
+const mensagensErroAuth = {
+  "auth/email-already-in-use": "Já existe uma conta com este e-mail.",
+  "auth/invalid-credential": "E-mail ou senha inválidos.",
+  "auth/invalid-email": "Informe um endereço de e-mail válido.",
+  "auth/network-request-failed": "Falha de conexão. Verifique sua internet e tente novamente.",
+  "auth/too-many-requests": "Muitas tentativas. Aguarde um pouco e tente novamente.",
+  "auth/weak-password": "A senha precisa ter pelo menos 6 caracteres.",
+};
+
+function AuthScreen({ message = "" }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -17,26 +31,16 @@ function AuthScreen({ supabase, message = "" }) {
 
     try {
       if (mode === "signup") {
-        const { data, error: authError } = await supabase.auth.signUp({
-          email,
-          password,
-        });
-
-        if (authError) throw authError;
-
-        if (!data.session) {
-          setNotice("Confira seu e-mail para confirmar a conta e entrar.");
-        }
+        await createUserWithEmailAndPassword(auth, email, password);
+        setNotice("Conta criada com sucesso.");
       } else {
-        const { error: authError } = await supabase.auth.signInWithPassword({
-          email,
-          password,
-        });
-
-        if (authError) throw authError;
+        await signInWithEmailAndPassword(auth, email, password);
       }
     } catch (authError) {
-      setError(authError.message || "Não foi possível autenticar.");
+      setError(
+        mensagensErroAuth[authError.code] ||
+          "Não foi possível autenticar. Verifique seus dados e tente novamente."
+      );
     } finally {
       setBusy(false);
     }
@@ -50,21 +54,7 @@ function AuthScreen({ supabase, message = "" }) {
           <span>Controle Financeiro</span>
         </div>
 
-        {!supabase ? (
-          <div className="auth-content">
-            <p className="auth-eyebrow">Acesso em qualquer dispositivo</p>
-            <h1>Configure sua conta</h1>
-            <p className="auth-description">
-              Para ativar o login e sincronizar seus dados, configure o Supabase
-              seguindo as instruções do README.
-            </p>
-            <p className="auth-message" role="status">
-              Faltam as variáveis VITE_SUPABASE_URL e
-              VITE_SUPABASE_PUBLISHABLE_KEY.
-            </p>
-          </div>
-        ) : (
-          <div className="auth-content">
+        <div className="auth-content">
             <p className="auth-eyebrow">Acesso em qualquer dispositivo</p>
             <h1>{mode === "login" ? "Entre na sua conta" : "Crie sua conta"}</h1>
             <p className="auth-description">
@@ -119,8 +109,7 @@ function AuthScreen({ supabase, message = "" }) {
                 ? "Ainda não tem uma conta? Criar conta"
                 : "Já tem uma conta? Entrar"}
             </button>
-          </div>
-        )}
+        </div>
       </section>
     </main>
   );

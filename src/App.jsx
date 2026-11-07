@@ -25,6 +25,11 @@ import "./App.css";
 import AuthScreen from "./AuthScreen.jsx";
 import { auth, db } from "./firebase.js";
 import {
+  calcularProgressoReserva,
+  normalizarReservaEmergencia,
+  registrarMovimentacaoReserva as atualizarReservaComMovimentacao,
+} from "./lib/emergencyFund.js";
+import {
   aplicarMetadadosRecorrencia,
   gerarOcorrenciasMensais,
 } from "./lib/recurrence.js";
@@ -49,7 +54,7 @@ const menuItems = [
   { id: "receitas", label: "Receitas" },
   { id: "despesas", label: "Despesas" },
   { id: "pagar", label: "Contas a pagar" },
-  { id: "receber", label: "Contas a receber" },
+  { id: "reserva", label: "Reserva de Emergência" },
   { id: "analise-categorias", label: "Análise por Categorias" },
   { id: "relatorios", label: "Relatórios" },
 ];
@@ -149,12 +154,17 @@ function obterCategoriasDisponiveis(listas) {
 }
 
 function normalizarDadosFinanceiros(dados = {}) {
-  return Object.fromEntries(
+  const listas = Object.fromEntries(
     ["receitas", "despesas", "contasPagar", "contasReceber", "orcamentos"].map((nome) => [
       nome,
       Array.isArray(dados[nome]) ? dados[nome] : [],
     ])
   );
+
+  return {
+    ...listas,
+    reservaEmergencia: normalizarReservaEmergencia(dados.reservaEmergencia),
+  };
 }
 
 function chaveCacheFinanceiro(userId) {
@@ -207,6 +217,16 @@ function App() {
   const [despesas, setDespesas] = useState([]);
   const [contasPagar, setContasPagar] = useState([]);
   const [contasReceber, setContasReceber] = useState([]);
+  const [reservaEmergencia, setReservaEmergencia] = useState(() =>
+    normalizarReservaEmergencia()
+  );
+  const [acaoReserva, setAcaoReserva] = useState("");
+  const [formMovimentacaoReserva, setFormMovimentacaoReserva] = useState({
+    valor: "",
+    data: new Date().toISOString().slice(0, 10),
+    observacao: "",
+  });
+  const [formMetaReserva, setFormMetaReserva] = useState("");
 
   const [formReceita, setFormReceita] = useState({
     ...lancamentoInicial,
@@ -221,25 +241,16 @@ function App() {
     status: "pendente",
     recorrente: false,
   });
-  const [formReceber, setFormReceber] = useState({
-    ...lancamentoInicial,
-    status: "pendente",
-  });
 
   const [filtroTipo, setFiltroTipo] = useState(filtrosIniciais.filtroTipo);
   const [filtroStatus, setFiltroStatus] = useState(filtrosIniciais.filtroStatus);
   const [orcamentos, setOrcamentos] = useState([]);
   const [formOrcamento, setFormOrcamento] = useState({
-    categoria: "",
-    valor: "",
-    ano: String(dataAtual.getFullYear()),
-    mes: String(dataAtual.getMonth()),
   });
   const [busca, setBusca] = useState(filtrosIniciais.busca);
   const [edicaoReceitaId, setEdicaoReceitaId] = useState(null);
   const [edicaoDespesaId, setEdicaoDespesaId] = useState(null);
   const [edicaoPagarId, setEdicaoPagarId] = useState(null);
-  const [edicaoReceberId, setEdicaoReceberId] = useState(null);
   const [edicaoOrcamentoId, setEdicaoOrcamentoId] = useState(null);
   const [tema, setTema] = useState(() => {
     const temaSalvo = localStorage.getItem("controle-financeiro-tema");
@@ -263,6 +274,9 @@ function App() {
       setDespesas([]);
       setContasPagar([]);
       setContasReceber([]);
+      setReservaEmergencia(normalizarReservaEmergencia());
+      setAcaoReserva("");
+      setFormMetaReserva("");
       setOrcamentos([]);
       setAuthLoading(false);
     });
@@ -283,6 +297,12 @@ function App() {
         setDespesas(dados.despesas);
         setContasPagar(dados.contasPagar);
         setContasReceber(dados.contasReceber);
+        setReservaEmergencia(dados.reservaEmergencia);
+        setFormMetaReserva(
+          dados.reservaEmergencia.meta === null
+            ? ""
+            : String(dados.reservaEmergencia.meta)
+        );
         setOrcamentos(dados.orcamentos);
         setDataOwnerId(userId);
         setDataReady(true);
@@ -295,7 +315,8 @@ function App() {
 
         let dados;
         if (registro.exists()) {
-          const dadosCarregados = normalizarDadosFinanceiros(registro.data());
+          const dadosOriginais = registro.data();
+          const dadosCarregados = normalizarDadosFinanceiros(dadosOriginais);
           dados = {
             ...dadosCarregados,
             receitas: gerarOcorrenciasMensais(dadosCarregados.receitas),
@@ -306,7 +327,9 @@ function App() {
           if (
             dados.receitas.length !== dadosCarregados.receitas.length ||
             dados.despesas.length !== dadosCarregados.despesas.length ||
-            dados.contasPagar.length !== dadosCarregados.contasPagar.length
+            dados.contasPagar.length !== dadosCarregados.contasPagar.length ||
+            !dadosOriginais.reservaEmergencia ||
+            typeof dadosOriginais.reservaEmergencia !== "object"
           ) {
             await setDoc(referencia, {
               ...dados,
@@ -364,6 +387,7 @@ function App() {
       contasPagar,
       contasReceber,
       orcamentos,
+      reservaEmergencia,
     });
     salvarCacheFinanceiro(userId, dados);
 
@@ -401,6 +425,7 @@ function App() {
     contasPagar,
     contasReceber,
     orcamentos,
+    reservaEmergencia,
   ]);
 
   useEffect(() => {
@@ -438,7 +463,6 @@ function App() {
       receitas,
       despesas,
       contasPagar,
-      contasReceber,
     ]);
 
     const anoAtualString = String(dataAtual.getFullYear());
@@ -448,7 +472,7 @@ function App() {
     }
 
     return anos;
-  }, [receitas, despesas, contasPagar, contasReceber, dataAtual]);
+  }, [receitas, despesas, contasPagar, dataAtual]);
 
   const categoriasDisponiveis = useMemo(
     () =>
@@ -456,9 +480,8 @@ function App() {
         receitas,
         despesas,
         contasPagar,
-        contasReceber,
       ]),
-    [receitas, despesas, contasPagar, contasReceber]
+    [receitas, despesas, contasPagar]
   );
 
   function pertenceAoPeriodo(item, mes, ano) {
@@ -596,7 +619,6 @@ function App() {
     const receitasFiltradas = receitas.filter(itemEstaNoFiltro);
     const despesasFiltradas = despesas.filter(itemEstaNoFiltro);
     const contasPagarFiltradas = contasPagar.filter(itemEstaNoFiltro);
-    const contasReceberFiltradas = contasReceber.filter(itemEstaNoFiltro);
 
     const receitasPagas = receitasFiltradas.filter(
       (item) => item.status === "pago"
@@ -615,14 +637,10 @@ function App() {
       (item) => item.status === "pago"
     );
 
-    const contasReceberPendentes = contasReceberFiltradas.filter(
-      (item) => item.status === "pendente"
-    );
-
     const totalReceitas = somar(receitasPagas);
     const totalDespesas = somar(despesasPagas);
     const totalContasPagarPagas = somar(contasPagarPagas);
-    const totalEntradas = totalReceitas + somar(contasReceberPendentes);
+    const totalEntradas = totalReceitas;
     // Total de saídas = dinheiro efetivamente pago (despesas pagas + contas a pagar já quitadas).
     // Contas a pagar pendentes NÃO entram aqui; ver totalPagar (card "A pagar").
     const totalSaidas = totalDespesas + totalContasPagarPagas;
@@ -643,13 +661,11 @@ function App() {
       totalSaidas,
       saldo: saldoAtual,
       totalPagar: somar(contasPagarPendentes),
-      totalReceber: somar(contasReceberPendentes),
     };
   }, [
     receitas,
     despesas,
     contasPagar,
-    contasReceber,
     anoSelecionado,
     mesSelecionado,
     periodoInicio,
@@ -661,9 +677,9 @@ function App() {
 
   // lançamentos sem data ficam fora de qualquer filtro por período (não somem, mas precisam de aviso)
   const lancamentosSemData = useMemo(() => {
-    const todos = [...receitas, ...despesas, ...contasPagar, ...contasReceber];
+    const todos = [...receitas, ...despesas, ...contasPagar];
     return todos.filter((item) => !item?.data).length;
-  }, [receitas, despesas, contasPagar, contasReceber]);
+  }, [receitas, despesas, contasPagar]);
 
   const dadosGraficos = useMemo(() => {
     const filtrarLista = (lista) => lista.filter(itemEstaNoFiltro);
@@ -671,7 +687,6 @@ function App() {
     const receitasFiltradas = filtrarLista(receitas);
     const despesasFiltradas = filtrarLista(despesas);
     const contasPagarFiltradas = filtrarLista(contasPagar);
-    const contasReceberFiltradas = filtrarLista(contasReceber);
 
     const somar = (lista) =>
       lista.reduce((total, item) => total + Number(item.valor || 0), 0);
@@ -681,14 +696,9 @@ function App() {
     const contasPagarPendentes = contasPagarFiltradas.filter(
       (item) => item.status === "pendente"
     );
-    const contasReceberPendentes = contasReceberFiltradas.filter(
-      (item) => item.status === "pendente"
-    );
-
     const totalReceitas = somar(receitasPagas);
     const totalDespesas = somar(despesasPagas);
     const totalPagar = somar(contasPagarPendentes);
-    const totalReceber = somar(contasReceberPendentes);
     const saldoAtual = totalReceitas - totalDespesas;
 
     const hoje = new Date().toISOString().slice(0, 10);
@@ -702,38 +712,25 @@ function App() {
     data90.setDate(data90.getDate() + 90);
     const hoje90 = data90.toISOString().slice(0, 10);
 
-    const contasVencidas = [...contasPagarPendentes, ...contasReceberPendentes].filter(
-      (item) => item.data < hoje
-    ).length;
-    const contasVenceHoje = [...contasPagarPendentes, ...contasReceberPendentes].filter(
-      (item) => item.data === hoje
-    ).length;
-    const contasVence7Dias = [...contasPagarPendentes, ...contasReceberPendentes].filter(
+    const contasVencidas = contasPagarPendentes.filter((item) => item.data < hoje).length;
+    const contasVenceHoje = contasPagarPendentes.filter((item) => item.data === hoje).length;
+    const contasVence7Dias = contasPagarPendentes.filter(
       (item) => item.data > hoje && item.data <= hoje7
     ).length;
 
-    const entradasPrevistas7 = somar(
-      contasReceberPendentes.filter((item) => item.data <= hoje7)
-    );
     const saidasPrevistas7 = somar(
       contasPagarPendentes.filter((item) => item.data <= hoje7)
     );
-    const entradasPrevistas30 = somar(
-      contasReceberPendentes.filter((item) => item.data <= hoje30)
-    );
     const saidasPrevistas30 = somar(
       contasPagarPendentes.filter((item) => item.data <= hoje30)
-    );
-    const entradasPrevistas90 = somar(
-      contasReceberPendentes.filter((item) => item.data <= hoje90)
     );
     const saidasPrevistas90 = somar(
       contasPagarPendentes.filter((item) => item.data <= hoje90)
     );
 
-    const saldoProjetado7 = saldoAtual + entradasPrevistas7 - saidasPrevistas7;
-    const saldoProjetado30 = saldoAtual + entradasPrevistas30 - saidasPrevistas30;
-    const saldoProjetado90 = saldoAtual + entradasPrevistas90 - saidasPrevistas90;
+    const saldoProjetado7 = saldoAtual - saidasPrevistas7;
+    const saldoProjetado30 = saldoAtual - saidasPrevistas30;
+    const saldoProjetado90 = saldoAtual - saidasPrevistas90;
 
     const registrosParaGrafico = [...receitasFiltradas, ...despesasFiltradas].filter(
       (item) => item.data
@@ -777,7 +774,7 @@ function App() {
 
     const agrupamentoPrevistoRealizado = {};
 
-    [...receitasFiltradas, ...despesasFiltradas, ...contasReceberFiltradas, ...contasPagarFiltradas].forEach((item) => {
+    [...receitasFiltradas, ...despesasFiltradas, ...contasPagarFiltradas].forEach((item) => {
       if (!item.data) {
         return;
       }
@@ -790,7 +787,6 @@ function App() {
           name: `${meses[Number(mes) - 1].slice(0, 3)}/${ano}`,
           realizadoReceitas: 0,
           realizadoDespesas: 0,
-          previstoReceitas: 0,
           previstoDespesas: 0,
         };
       }
@@ -801,10 +797,6 @@ function App() {
 
       if (item.tipo === "despesa" && item.status === "pago") {
         agrupamentoPrevistoRealizado[chave].realizadoDespesas += Number(item.valor || 0);
-      }
-
-      if (item.tipo === "conta-receber" && item.status === "pendente") {
-        agrupamentoPrevistoRealizado[chave].previstoReceitas += Number(item.valor || 0);
       }
 
       if (item.tipo === "conta-pagar" && item.status === "pendente") {
@@ -960,7 +952,6 @@ function App() {
       totalReceitas,
       totalDespesas,
       totalPagar,
-      totalReceber,
       saldo: saldoAtual,
       resultado: saldoAtual,
       evolucaoMensal,
@@ -973,11 +964,8 @@ function App() {
       contasVencidas,
       contasVenceHoje,
       contasVence7Dias,
-      entradasPrevistas7,
       saidasPrevistas7,
-      entradasPrevistas30,
       saidasPrevistas30,
-      entradasPrevistas90,
       saidasPrevistas90,
       saldoProjetado7,
       saldoProjetado30,
@@ -999,7 +987,6 @@ function App() {
     receitas,
     despesas,
     contasPagar,
-    contasReceber,
     orcamentos,
     anoSelecionado,
     mesSelecionado,
@@ -1082,7 +1069,7 @@ function App() {
         ? { recorrente: false }
         : {}),
       status:
-        tipo === "conta-pagar" || tipo === "conta-receber"
+        tipo === "conta-pagar"
           ? "pendente"
           : "pago",
     });
@@ -1111,7 +1098,7 @@ function App() {
         ? { recorrente: false }
         : {}),
       status:
-        tipo === "conta-pagar" || tipo === "conta-receber"
+        tipo === "conta-pagar"
           ? "pendente"
           : "pago",
     });
@@ -1183,6 +1170,46 @@ function App() {
       ano: String(dataAtual.getFullYear()),
       mes: String(dataAtual.getMonth()),
     });
+  }
+
+  function salvarMovimentacaoReserva(evento) {
+    evento.preventDefault();
+
+    if (!acaoReserva) return;
+
+    try {
+      const reservaAtualizada = atualizarReservaComMovimentacao(
+        reservaEmergencia,
+        {
+          tipo: acaoReserva,
+          ...formMovimentacaoReserva,
+        }
+      );
+      setReservaEmergencia(reservaAtualizada);
+      setFormMovimentacaoReserva({
+        valor: "",
+        data: new Date().toISOString().slice(0, 10),
+        observacao: "",
+      });
+      setAcaoReserva("");
+    } catch (erro) {
+      window.alert(erro.message);
+    }
+  }
+
+  function salvarMetaReserva(evento) {
+    evento.preventDefault();
+    const meta = formMetaReserva.trim() ? Number(formMetaReserva) : null;
+
+    if (meta !== null && (!Number.isFinite(meta) || meta <= 0)) {
+      window.alert("Informe uma meta maior que zero ou deixe o campo vazio.");
+      return;
+    }
+
+    setReservaEmergencia((reservaAtual) => ({
+      ...reservaAtual,
+      meta,
+    }));
   }
 
   function editarOrcamento(item) {
@@ -1506,7 +1533,7 @@ function App() {
           {dadosGraficos.previstoRealizadoMensal.length === 0 ? (
             <div className="empty-state compact">
               <strong>Sem dados de previsão</strong>
-              <p>Use contas a pagar e receber para gerar o gráfico.</p>
+              <p>Cadastre contas a pagar para acompanhar as saídas previstas.</p>
             </div>
           ) : (
             <ResponsiveContainer width="100%" height={300}>
@@ -1517,7 +1544,6 @@ function App() {
                 <Tooltip formatter={(value) => formatarValor(value)} />
                 <Legend />
                 <Bar dataKey="realizadoReceitas" fill="#0ea5e9" radius={[8, 8, 0, 0]} />
-                <Bar dataKey="previstoReceitas" fill="#60a5fa" radius={[8, 8, 0, 0]} />
                 <Bar dataKey="realizadoDespesas" fill="#ef4444" radius={[8, 8, 0, 0]} />
                 <Bar dataKey="previstoDespesas" fill="#fda4af" radius={[8, 8, 0, 0]} />
               </BarChart>
@@ -1810,10 +1836,10 @@ function App() {
   }
 
   function renderDashboard() {
+    const progressoReserva = calcularProgressoReserva(reservaEmergencia);
     const ultimosLancamentos = [
       ...receitas.map((item) => ({ ...item, origem: "Receita" })),
       ...despesas.map((item) => ({ ...item, origem: "Despesa" })),
-      ...contasReceber.map((item) => ({ ...item, origem: "Conta a receber" })),
       ...contasPagar.map((item) => ({ ...item, origem: "Conta a pagar" })),
     ]
       .sort((a, b) => b.id - a.id)
@@ -1928,7 +1954,7 @@ function App() {
         {renderFilters()}
         {renderDashboardAlerts()}
 
-        <section className="cards cards-four">
+        <section className="cards cards-four dashboard-key-cards">
           <article className="card">
             <p>Saldo atual</p>
             <strong className={totais.saldo >= 0 ? "positive" : "negative"}>
@@ -1937,31 +1963,67 @@ function App() {
           </article>
 
           <article className="card">
-            <p>Total de entradas</p>
+            <p>Receitas</p>
             <strong className="positive">
-              {formatarValor(totais.totalEntradas)}
+              {formatarValor(totais.totalReceitas)}
             </strong>
           </article>
 
           <article className="card">
-            <p>Total de saídas</p>
+            <p>Despesas</p>
             <strong className="negative">
-              {formatarValor(totais.totalSaidas)}
+              {formatarValor(totais.totalDespesas)}
             </strong>
           </article>
 
+          <article className="card reserve-dashboard-card">
+            <div className="reserve-dashboard-heading">
+              <p>Reserva de Emergência</p>
+              <strong>{formatarValor(reservaEmergencia.saldo)}</strong>
+            </div>
+            <div className="reserve-dashboard-meta">
+              <span>
+                {reservaEmergencia.meta
+                  ? `Meta ${formatarValor(reservaEmergencia.meta)}`
+                  : "Meta não definida"}
+              </span>
+              <b>
+                {reservaEmergencia.meta
+                  ? `${progressoReserva.toFixed(1).replace(".", ",")}%`
+                  : "--"}
+              </b>
+            </div>
+            <div className="reserve-dashboard-track">
+              <div
+                className="reserve-dashboard-fill"
+                style={{ width: `${Math.min(Math.max(progressoReserva, 0), 100)}%` }}
+              />
+            </div>
+            <button
+              className="reserve-dashboard-link"
+              type="button"
+              onClick={() => setPagina("reserva")}
+            >
+              Gerenciar reserva
+            </button>
+          </article>
+        </section>
+
+        <section className="cards cards-four dashboard-secondary-cards">
+          <article className="card">
+            <p>Total de entradas</p>
+            <strong className="positive">{formatarValor(totais.totalEntradas)}</strong>
+          </article>
+          <article className="card">
+            <p>Total de saídas</p>
+            <strong className="negative">{formatarValor(totais.totalSaidas)}</strong>
+          </article>
           <article className="card">
             <p>Resultado líquido</p>
             <strong className={totais.saldo >= 0 ? "positive" : "negative"}>
               {formatarValor(totais.saldo)}
             </strong>
           </article>
-
-          <article className="card">
-            <p>Contas a receber</p>
-            <strong>{formatarValor(totais.totalReceber)}</strong>
-          </article>
-
           <article className="card">
             <p>A pagar</p>
             <strong>{formatarValor(totais.totalPagar)}</strong>
@@ -2053,7 +2115,6 @@ function App() {
     const receitasFiltradas = filtradas(receitas);
     const despesasFiltradas = filtradas(despesas);
     const contasPagarFiltradas = filtradas(contasPagar);
-    const contasReceberFiltradas = filtradas(contasReceber);
 
     const totalMovimentacoes = receitasFiltradas.length + despesasFiltradas.length;
     const totalReceitasPagas = receitasFiltradas
@@ -2062,16 +2123,9 @@ function App() {
     const totalDespesasPagas = despesasFiltradas
       .filter((item) => item.status === "pago")
       .reduce((acc, item) => acc + Number(item.valor || 0), 0);
-    const totalPendente =
-      contasPagarFiltradas
-        .filter((item) => item.status === "pendente")
-        .reduce((acc, item) => acc + Number(item.valor || 0), 0) +
-      contasReceberFiltradas
-        .filter((item) => item.status === "pendente")
-        .reduce((acc, item) => acc + Number(item.valor || 0), 0);
-    const pendencias =
-      contasPagarFiltradas.filter((item) => item.status === "pendente").length +
-      contasReceberFiltradas.filter((item) => item.status === "pendente").length;
+    const pendencias = contasPagarFiltradas.filter(
+      (item) => item.status === "pendente"
+    ).length;
     const resultado = totalReceitasPagas - totalDespesasPagas;
     const margem = totalReceitasPagas > 0 ? (resultado / totalReceitasPagas) * 100 : 0;
     const relatorioData = formatarData(new Date().toISOString().slice(0, 10));
@@ -2161,13 +2215,6 @@ function App() {
             <div className="report-metric">
               <span className="metric-label">Margem financeira</span>
               <strong>{margem.toFixed(1).replace('.', ',')}%</strong>
-            </div>
-
-            <div className="report-metric">
-              <span className="metric-label">Entradas pendentes</span>
-              <strong>{formatarValor(contasReceberFiltradas
-                .filter((item) => item.status === "pendente")
-                .reduce((acc, item) => acc + Number(item.valor || 0), 0))}</strong>
             </div>
 
             <div className="report-metric">
@@ -2550,6 +2597,221 @@ function App() {
     );
   }
 
+  function renderReservaEmergencia() {
+    const progresso = calcularProgressoReserva(reservaEmergencia);
+
+    return (
+      <>
+        <header className="page-header">
+          <div>
+            <p className="subtitle">Proteção financeira</p>
+            <h1>Reserva de Emergência</h1>
+            <p className="page-description">
+              Acompanhe o valor guardado sem misturá-lo às receitas e despesas do período.
+            </p>
+          </div>
+        </header>
+
+        <section className="reserve-overview">
+          <div className="reserve-balance">
+            <span>Saldo guardado</span>
+            <strong>{formatarValor(reservaEmergencia.saldo)}</strong>
+            <p>
+              {reservaEmergencia.meta
+                ? `Meta de ${formatarValor(reservaEmergencia.meta)}`
+                : "Defina uma meta para acompanhar seu progresso."}
+            </p>
+          </div>
+          <div className="reserve-progress-area">
+            <div className="reserve-progress-heading">
+              <span>Progresso da meta</span>
+              <strong>
+                {reservaEmergencia.meta
+                  ? `${progresso.toFixed(1).replace(".", ",")}%`
+                  : "Sem meta"}
+              </strong>
+            </div>
+            <div
+              className="reserve-progress-track"
+              role="progressbar"
+              aria-label="Progresso da reserva de emergência"
+              aria-valuenow={reservaEmergencia.meta ? Math.min(progresso, 100) : 0}
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <div
+                className="reserve-progress-fill"
+                style={{ width: `${Math.min(Math.max(progresso, 0), 100)}%` }}
+              />
+            </div>
+            <p>
+              {reservaEmergencia.meta
+                ? `${formatarValor(Math.max(reservaEmergencia.meta - reservaEmergencia.saldo, 0))} para atingir a meta`
+                : "O progresso aparecerá aqui quando houver uma meta definida."}
+            </p>
+          </div>
+        </section>
+
+        <div className="reserve-controls-grid">
+          <section className="reserve-actions-section">
+            <div className="section-heading">
+              <div>
+                <p className="subtitle">Movimentação</p>
+                <h2>Atualizar reserva</h2>
+              </div>
+            </div>
+            <div className="reserve-action-buttons">
+              <button
+                className="reserve-action-button reserve-add"
+                type="button"
+                aria-pressed={acaoReserva === "aporte"}
+                onClick={() => setAcaoReserva(acaoReserva === "aporte" ? "" : "aporte")}
+              >
+                + Adicionar valor
+              </button>
+              <button
+                className="reserve-action-button reserve-withdraw"
+                type="button"
+                aria-pressed={acaoReserva === "retirada"}
+                onClick={() => setAcaoReserva(acaoReserva === "retirada" ? "" : "retirada")}
+              >
+                − Retirar valor
+              </button>
+            </div>
+
+            {acaoReserva && (
+              <form className="reserve-form" onSubmit={salvarMovimentacaoReserva}>
+                <div className="reserve-form-grid">
+                  <label>
+                    Valor
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      required
+                      value={formMovimentacaoReserva.valor}
+                      onChange={(evento) =>
+                        setFormMovimentacaoReserva((anterior) => ({
+                          ...anterior,
+                          valor: evento.target.value,
+                        }))
+                      }
+                      placeholder="0,00"
+                    />
+                  </label>
+                  <label>
+                    Data
+                    <input
+                      type="date"
+                      required
+                      value={formMovimentacaoReserva.data}
+                      onChange={(evento) =>
+                        setFormMovimentacaoReserva((anterior) => ({
+                          ...anterior,
+                          data: evento.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+                <label>
+                  Observação <span className="optional-label">Opcional</span>
+                  <input
+                    type="text"
+                    maxLength="160"
+                    value={formMovimentacaoReserva.observacao}
+                    onChange={(evento) =>
+                      setFormMovimentacaoReserva((anterior) => ({
+                        ...anterior,
+                        observacao: evento.target.value,
+                      }))
+                    }
+                    placeholder="Ex.: transferência para poupança"
+                  />
+                </label>
+                <div className="reserve-form-actions">
+                  <button className="primary-button" type="submit">
+                    Salvar {acaoReserva === "aporte" ? "aporte" : "retirada"}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => setAcaoReserva("")}
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+
+          <section className="reserve-goal-section">
+            <div>
+              <p className="subtitle">Planejamento</p>
+              <h2>Meta da reserva</h2>
+            </div>
+            <form className="reserve-form" onSubmit={salvarMetaReserva}>
+              <label>
+                Valor da meta <span className="optional-label">Opcional</span>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={formMetaReserva}
+                  onChange={(evento) => setFormMetaReserva(evento.target.value)}
+                  placeholder="Ex.: 20000,00"
+                />
+              </label>
+              <p className="field-hint">Deixe em branco para remover a meta.</p>
+              <button className="secondary-button" type="submit">
+                Salvar meta
+              </button>
+            </form>
+          </section>
+        </div>
+
+        <section className="panel reserve-history">
+          <div className="section-heading">
+            <div>
+              <p className="subtitle">Histórico</p>
+              <h2>Movimentações da reserva</h2>
+            </div>
+            <strong>{reservaEmergencia.movimentacoes.length} registros</strong>
+          </div>
+
+          {reservaEmergencia.movimentacoes.length === 0 ? (
+            <div className="empty-state">
+              <strong>Nenhuma movimentação registrada</strong>
+              <p>Adicione um aporte ou uma retirada para começar o histórico.</p>
+            </div>
+          ) : (
+            <div className="reserve-history-list">
+              <div className="reserve-history-row reserve-history-header">
+                <span>Data</span>
+                <span>Tipo</span>
+                <span>Observação</span>
+                <span>Valor</span>
+              </div>
+              {reservaEmergencia.movimentacoes.map((movimentacao) => (
+                <div className="reserve-history-row" key={movimentacao.id}>
+                  <span data-label="Data">{formatarData(movimentacao.data)}</span>
+                  <strong data-label="Tipo" className={movimentacao.tipo === "aporte" ? "positive" : "negative"}>
+                    {movimentacao.tipo === "aporte" ? "Aporte" : "Retirada"}
+                  </strong>
+                  <span data-label="Observação">{movimentacao.observacao || "Sem observação"}</span>
+                  <strong data-label="Valor" className={movimentacao.tipo === "aporte" ? "positive" : "negative"}>
+                    {movimentacao.tipo === "retirada" ? "− " : "+ "}
+                    {formatarValor(movimentacao.valor)}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </>
+    );
+  }
+
   function renderizarPagina() {
     if (pagina === "receitas") {
       return (
@@ -2671,44 +2933,8 @@ function App() {
       );
     }
 
-    if (pagina === "receber") {
-      return (
-        <>
-          <header className="page-header">
-            <div>
-              <p className="subtitle">Créditos</p>
-              <h1>Contas a receber</h1>
-            </div>
-          </header>
-
-          {renderFormulario({
-            titulo: "Cadastrar recebimento",
-            subtitulo: "Nova previsão",
-            formulario: formReceber,
-            lista: contasReceber,
-            setFormulario: setFormReceber,
-            setLista: setContasReceber,
-            idEdicao: edicaoReceberId,
-            setIdEdicao: setEdicaoReceberId,
-            tipo: "conta-receber",
-            textoBotao: "Salvar conta a receber",
-            textoBotaoEditar: "Atualizar recebimento",
-          })}
-
-          {renderLista({
-            titulo: "Recebimentos cadastrados",
-            subtitulo: "Controle",
-            lista: contasReceber,
-            setLista: setContasReceber,
-            onEditar: (item) =>
-              iniciarEdicaoLancamento(
-                item,
-                setFormReceber,
-                setEdicaoReceberId
-              ),
-          })}
-        </>
-      );
+    if (pagina === "reserva") {
+      return renderReservaEmergencia();
     }
 
     if (pagina === "relatorios") {

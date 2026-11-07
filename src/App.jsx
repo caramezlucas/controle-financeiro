@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -15,6 +15,8 @@ import {
   YAxis,
 } from "recharts";
 import "./App.css";
+import AuthScreen from "./AuthScreen.jsx";
+import { supabase } from "./lib/supabase.js";
 
 const meses = [
   "Janeiro",
@@ -150,9 +152,44 @@ function obterCategoriasDisponiveis(listas) {
   );
 }
 
+const chavesDadosFinanceiros = {
+  receitas: "controle-financeiro-receitas",
+  despesas: "controle-financeiro-despesas",
+  contasPagar: "controle-financeiro-contas-pagar",
+  contasReceber: "controle-financeiro-contas-receber",
+  orcamentos: "controle-financeiro-orcamentos",
+};
+
+function carregarDadosFinanceirosLocais() {
+  return Object.fromEntries(
+    Object.entries(chavesDadosFinanceiros).map(([nome, chave]) => [
+      nome,
+      carregarDados(chave),
+    ])
+  );
+}
+
+function normalizarDadosFinanceiros(dados = {}) {
+  return Object.fromEntries(
+    Object.keys(chavesDadosFinanceiros).map((nome) => [
+      nome,
+      Array.isArray(dados[nome]) ? dados[nome] : [],
+    ])
+  );
+}
+
 function App() {
   const dataAtual = new Date();
   const filtrosIniciais = carregarFiltrosSalvos(dataAtual);
+  const [session, setSession] = useState(null);
+  const [authLoading, setAuthLoading] = useState(Boolean(supabase));
+  const [dataReady, setDataReady] = useState(false);
+  const [dataOwnerId, setDataOwnerId] = useState(null);
+  const [dataLoadingError, setDataLoadingError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [syncStatus, setSyncStatus] = useState("synced");
+  const [syncError, setSyncError] = useState("");
+  const saveQueue = useRef(Promise.resolve());
 
   const [pagina, setPagina] = useState("dashboard");
   const [mesSelecionado, setMesSelecionado] = useState(
@@ -218,6 +255,158 @@ function App() {
 
     return "executivo";
   });
+
+  useEffect(() => {
+    if (!supabase) {
+      return undefined;
+    }
+
+    let active = true;
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      setAuthLoading(false);
+    });
+
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (!active) return;
+      if (error) setDataLoadingError(error.message);
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const userId = session?.user?.id;
+
+    if (!supabase || !userId) {
+      return undefined;
+    }
+
+    let active = true;
+
+    async function carregarDadosDaConta() {
+      try {
+        const { data: registro, error } = await supabase
+          .from("financial_data")
+          .select("data")
+          .eq("user_id", userId)
+          .maybeSingle();
+
+        if (error) throw error;
+
+        let dados = normalizarDadosFinanceiros(registro?.data);
+
+        if (!registro) {
+          const migracaoRealizada =
+            localStorage.getItem("controle-financeiro-migracao-cloud") === "true";
+
+          if (!migracaoRealizada) {
+            const dadosLocais = normalizarDadosFinanceiros(
+              carregarDadosFinanceirosLocais()
+            );
+            const existeDadoLocal = Object.values(dadosLocais).some(
+              (lista) => lista.length > 0
+            );
+
+            if (
+              existeDadoLocal &&
+              window.confirm(
+                "Esta conta ainda não tem dados. Deseja importar os lançamentos salvos neste aparelho?"
+              )
+            ) {
+              dados = dadosLocais;
+            }
+          }
+
+          const { error: saveError } = await supabase
+            .from("financial_data")
+            .upsert({ user_id: userId, data: dados }, { onConflict: "user_id" });
+
+          if (saveError) throw saveError;
+        }
+
+        if (!active) return;
+
+        localStorage.setItem("controle-financeiro-migracao-cloud", "true");
+        setDataLoadingError("");
+        setReceitas(dados.receitas);
+        setDespesas(dados.despesas);
+        setContasPagar(dados.contasPagar);
+        setContasReceber(dados.contasReceber);
+        setOrcamentos(dados.orcamentos);
+        setDataOwnerId(userId);
+        setDataReady(true);
+      } catch (error) {
+        if (active) setDataLoadingError(error.message || "Erro ao carregar seus dados.");
+      }
+    }
+
+    carregarDadosDaConta();
+
+    return () => {
+      active = false;
+    };
+  }, [session?.user?.id, loadAttempt]);
+
+  useEffect(() => {
+    const userId = session?.user?.id;
+
+    if (!supabase || !userId || !dataReady || dataOwnerId !== userId) {
+      return undefined;
+    }
+
+    let active = true;
+    const dados = normalizarDadosFinanceiros({
+      receitas,
+      despesas,
+      contasPagar,
+      contasReceber,
+      orcamentos,
+    });
+
+    const timer = window.setTimeout(() => {
+      setSyncStatus("syncing");
+      setSyncError("");
+      saveQueue.current = saveQueue.current
+        .catch(() => {})
+        .then(async () => {
+          const { error } = await supabase
+            .from("financial_data")
+            .upsert({ user_id: userId, data: dados }, { onConflict: "user_id" });
+
+          if (error) throw error;
+        })
+        .then(() => {
+          if (active) setSyncStatus("synced");
+        })
+        .catch((error) => {
+          if (!active) return;
+          setSyncStatus("error");
+          setSyncError(error.message || "Não foi possível sincronizar.");
+        });
+    }, 500);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [
+    session?.user?.id,
+    dataReady,
+    dataOwnerId,
+    receitas,
+    despesas,
+    contasPagar,
+    contasReceber,
+    orcamentos,
+  ]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -461,19 +650,35 @@ function App() {
       (item) => item.status === "pendente"
     );
 
+    // contas a pagar já quitadas contam como dinheiro que efetivamente saiu do caixa
+    const contasPagarPagas = contasPagarFiltradas.filter(
+      (item) => item.status === "pago"
+    );
+
     const contasReceberPendentes = contasReceberFiltradas.filter(
       (item) => item.status === "pendente"
     );
 
     const totalReceitas = somar(receitasPagas);
     const totalDespesas = somar(despesasPagas);
+    const totalContasPagarPagas = somar(contasPagarPagas);
     const totalEntradas = totalReceitas + somar(contasReceberPendentes);
-    const totalSaidas = totalDespesas + somar(contasPagarPendentes);
+    // Total de saídas = dinheiro efetivamente pago (despesas pagas + contas a pagar já quitadas).
+    // Contas a pagar pendentes NÃO entram aqui; ver totalPagar (card "A pagar").
+    const totalSaidas = totalDespesas + totalContasPagarPagas;
     const saldoAtual = totalEntradas - totalSaidas;
+
+    // TEMP-DEBUG-VALIDACAO: remover antes de finalizar
+    console.log("[validacao totais]", {
+      totalDespesasPagas: totalDespesas,
+      totalContasPagarPagas,
+      totalSaidas,
+    });
 
     return {
       totalReceitas,
       totalDespesas,
+      totalContasPagarPagas,
       totalEntradas,
       totalSaidas,
       saldo: saldoAtual,
@@ -493,6 +698,12 @@ function App() {
     filtroStatus,
     filtroTipo,
   ]);
+
+  // lançamentos sem data ficam fora de qualquer filtro por período (não somem, mas precisam de aviso)
+  const lancamentosSemData = useMemo(() => {
+    const todos = [...receitas, ...despesas, ...contasPagar, ...contasReceber];
+    return todos.filter((item) => !item?.data).length;
+  }, [receitas, despesas, contasPagar, contasReceber]);
 
   const dadosGraficos = useMemo(() => {
     const filtrarLista = (lista) => lista.filter(itemEstaNoFiltro);
@@ -1589,6 +1800,25 @@ function App() {
     function renderDashboardAlerts() {
       const alertas = [];
 
+      const filtrosAdicionaisAtivos =
+        Boolean(filtroCategoria) ||
+        filtroTipo !== "all" ||
+        filtroStatus !== "all" ||
+        Boolean(periodoInicio) ||
+        Boolean(periodoFim);
+
+      if (filtrosAdicionaisAtivos) {
+        alertas.push(
+          "Existem filtros adicionais ativos (categoria, tipo, status ou período) além do mês/ano — eles podem estar ocultando valores. Use \"Limpar filtros\" para ver o total completo."
+        );
+      }
+
+      if (lancamentosSemData > 0) {
+        alertas.push(
+          `Existem ${lancamentosSemData} lançamento(s) sem data cadastrada. Eles não entram no total do período selecionado.`
+        );
+      }
+
       if (dadosGraficos.contasVencidas > 0) {
         alertas.push(
           `Existem ${dadosGraficos.contasVencidas} contas vencidas aguardando ação.`
@@ -1711,7 +1941,7 @@ function App() {
           </article>
 
           <article className="card">
-            <p>Contas a pagar</p>
+            <p>A pagar</p>
             <strong>{formatarValor(totais.totalPagar)}</strong>
           </article>
 
@@ -2466,6 +2696,52 @@ function App() {
     return renderDashboard();
   }
 
+  if (authLoading) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel auth-loading">
+          Verificando acesso...
+        </section>
+      </main>
+    );
+  }
+
+  if (!session) {
+    return <AuthScreen supabase={supabase} />;
+  }
+
+  if (!dataReady || dataOwnerId !== session.user.id) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-panel">
+          <div className="auth-content">
+            <p className="auth-eyebrow">Controle Financeiro</p>
+            <h1>{dataLoadingError ? "Não foi possível carregar" : "Carregando seus dados"}</h1>
+            <p className="auth-description">
+              {dataLoadingError || "Conectando sua conta e sincronizando os lançamentos."}
+            </p>
+            {dataLoadingError && (
+              <button
+                className="auth-submit"
+                type="button"
+                onClick={() => setLoadAttempt((attempt) => attempt + 1)}
+              >
+                Tentar novamente
+              </button>
+            )}
+            <button
+              className="auth-mode-toggle"
+              type="button"
+              onClick={() => supabase.auth.signOut()}
+            >
+              Sair da conta
+            </button>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <div className={`app theme-${tema}`}>
       <aside className="sidebar">
@@ -2511,7 +2787,28 @@ function App() {
           </div>
 
           <strong>Versão 1.0</strong>
-          <span>Dados salvos automaticamente</span>
+          <div className="account-panel">
+            <span className="account-email" title={session.user.email}>
+              {session.user.email}
+            </span>
+            <span
+              className={`sync-label sync-${syncStatus}`}
+              title={syncError || "Dados sincronizados com sua conta"}
+            >
+              {syncStatus === "syncing"
+                ? "Sincronizando..."
+                : syncStatus === "error"
+                  ? "Falha na sincronização"
+                  : "Sincronizado na nuvem"}
+            </span>
+            <button
+              className="account-signout"
+              type="button"
+              onClick={() => supabase.auth.signOut()}
+            >
+              Sair
+            </button>
+          </div>
         </div>
       </aside>
 

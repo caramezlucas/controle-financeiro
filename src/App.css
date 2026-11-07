@@ -1080,3 +1080,40 @@ textarea {
     animation: none !important;
   }
 }
+
+.account-panel {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--sidebar-line);
+}
+
+.account-email,
+.sync-label {
+  overflow: hidden;
+  color: var(--sidebar-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sync-label.sync-error {
+  color: #ffb4a9;
+}
+
+.account-signout {
+  justify-self: start;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--sidebar-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.auth-loading {
+  padding: 34px 28px;
+  color: #263d40;
+  font-weight: 700;
+}

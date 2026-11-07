@@ -102,6 +102,7 @@ export function gerarOcorrenciasMensais(lancamentos, hoje = new Date()) {
   const origens = resultado.filter(
     (item) =>
       item.recorrente === true &&
+      item.despesaFixa !== true &&
       item.recorrenciaFrequencia === "mensal" &&
       item.recorrenciaOrigem === true &&
       item.recorrenciaId

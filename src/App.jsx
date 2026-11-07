@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import {
   doc,
-  getDoc,
+  onSnapshot,
+  runTransaction,
   serverTimestamp,
-  setDoc,
 } from "firebase/firestore";
 import {
   Area,
@@ -30,9 +30,20 @@ import {
   registrarMovimentacaoReserva as atualizarReservaComMovimentacao,
 } from "./lib/emergencyFund.js";
 import {
+  cancelarSerieDespesa,
+  criarDespesaFixa,
+  editarDespesaFixa,
+  gerarDespesasFixas,
+} from "./lib/fixedExpenses.js";
+import {
   aplicarMetadadosRecorrencia,
   gerarOcorrenciasMensais,
 } from "./lib/recurrence.js";
+import {
+  criarIdFinanceiro,
+  financialValuesEqual,
+  mergeFinancialData,
+} from "./lib/financialSync.js";
 
 const meses = [
   "Janeiro",
@@ -57,11 +68,6 @@ const menuItems = [
   { id: "reserva", label: "Reserva de Emergência" },
   { id: "analise-categorias", label: "Análise por Categorias" },
   { id: "relatorios", label: "Relatórios" },
-];
-
-const temas = [
-  { id: "executivo", label: "Executivo" },
-  { id: "clean", label: "Clean" },
 ];
 
 const lancamentoInicial = {
@@ -200,7 +206,13 @@ function App() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [syncStatus, setSyncStatus] = useState("local");
   const [syncError, setSyncError] = useState("");
-  const saveQueue = useRef(Promise.resolve());
+  const firestoreReadyRef = useRef(false);
+  const baseFinancialDataRef = useRef(null);
+  const financialDataRef = useRef(null);
+  const firestoreWriteInProgressRef = useRef(false);
+  const pendingSnapshotRef = useRef(null);
+  const processSnapshotRef = useRef(null);
+  const [remoteRevision, setRemoteRevision] = useState(0);
 
   const [pagina, setPagina] = useState("dashboard");
   const [mesSelecionado, setMesSelecionado] = useState(
@@ -235,6 +247,9 @@ function App() {
   const [formDespesa, setFormDespesa] = useState({
     ...lancamentoInicial,
     recorrente: false,
+    despesaFixa: false,
+    tipoDespesaFixa: "continua",
+    quantidadeParcelas: "",
   });
   const [formPagar, setFormPagar] = useState({
     ...lancamentoInicial,
@@ -251,19 +266,27 @@ function App() {
   const [edicaoReceitaId, setEdicaoReceitaId] = useState(null);
   const [edicaoDespesaId, setEdicaoDespesaId] = useState(null);
   const [edicaoPagarId, setEdicaoPagarId] = useState(null);
+  const [despesaFixaParaEditar, setDespesaFixaParaEditar] = useState(null);
+  const [escopoEdicaoDespesaFixa, setEscopoEdicaoDespesaFixa] = useState("");
   const [edicaoOrcamentoId, setEdicaoOrcamentoId] = useState(null);
-  const [tema, setTema] = useState(() => {
-    const temaSalvo = localStorage.getItem("controle-financeiro-tema");
-
-    if (temaSalvo === "clean" || temaSalvo === "executivo") {
-      return temaSalvo;
-    }
-
-    return "executivo";
-  });
+  useEffect(() => {
+    financialDataRef.current = normalizarDadosFinanceiros({
+      receitas,
+      despesas,
+      contasPagar,
+      contasReceber,
+      orcamentos,
+      reservaEmergencia,
+    });
+  }, [receitas, despesas, contasPagar, contasReceber, orcamentos, reservaEmergencia]);
 
   useEffect(() => {
     return onAuthStateChanged(auth, (nextUser) => {
+      firestoreReadyRef.current = false;
+      baseFinancialDataRef.current = null;
+      firestoreWriteInProgressRef.current = false;
+      pendingSnapshotRef.current = null;
+      processSnapshotRef.current = null;
       setUser(nextUser);
       setDataReady(false);
       setDataOwnerId(null);
@@ -284,92 +307,172 @@ function App() {
 
   useEffect(() => {
     const userId = user?.uid;
-
-    if (!userId) {
-      return undefined;
-    }
+    if (!userId) return undefined;
 
     let active = true;
+    let cacheFallbackShown = false;
+    const referencia = doc(db, "financial_data", userId);
 
-    async function carregarDadosDaConta() {
-      function aplicarDados(dados) {
-        setReceitas(dados.receitas);
-        setDespesas(dados.despesas);
-        setContasPagar(dados.contasPagar);
-        setContasReceber(dados.contasReceber);
-        setReservaEmergencia(dados.reservaEmergencia);
-        setFormMetaReserva(
-          dados.reservaEmergencia.meta === null
-            ? ""
-            : String(dados.reservaEmergencia.meta)
-        );
-        setOrcamentos(dados.orcamentos);
-        setDataOwnerId(userId);
-        setDataReady(true);
+    function aplicarDados(dados, salvarCache = true) {
+      const normalizados = normalizarDadosFinanceiros(dados);
+      if (salvarCache) salvarCacheFinanceiro(userId, normalizados);
+      setReceitas(normalizados.receitas);
+      setDespesas(normalizados.despesas);
+      setContasPagar(normalizados.contasPagar);
+      setContasReceber(normalizados.contasReceber);
+      setReservaEmergencia(normalizados.reservaEmergencia);
+      setFormMetaReserva(
+        normalizados.reservaEmergencia.meta === null
+          ? ""
+          : String(normalizados.reservaEmergencia.meta)
+      );
+      setOrcamentos(normalizados.orcamentos);
+      setDataOwnerId(userId);
+      setDataReady(true);
+    }
+
+    async function processarSnapshot(snapshot) {
+      if (!active || snapshot.metadata.fromCache) return;
+      firestoreReadyRef.current = true;
+
+      const baseAnterior = baseFinancialDataRef.current;
+      if (
+        baseAnterior &&
+        !financialValuesEqual(financialDataRef.current, baseAnterior)
+      ) {
+        pendingSnapshotRef.current = snapshot;
+        setRemoteRevision((revision) => revision + 1);
+        return;
       }
 
       try {
-        const referencia = doc(db, "financial_data", userId);
-        const registro = await getDoc(referencia);
-        if (!active) return;
+        const dadosRemotos = await runTransaction(db, async (transacao) => {
+          const atual = await transacao.get(referencia);
+          if (!atual.exists()) {
+            const vazios = normalizarDadosFinanceiros();
+            transacao.set(referencia, {
+              ...vazios,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+            return vazios;
+          }
 
-        let dados;
-        if (registro.exists()) {
-          const dadosOriginais = registro.data();
-          const dadosCarregados = normalizarDadosFinanceiros(dadosOriginais);
-          dados = {
-            ...dadosCarregados,
-            receitas: gerarOcorrenciasMensais(dadosCarregados.receitas),
-            despesas: gerarOcorrenciasMensais(dadosCarregados.despesas),
-            contasPagar: gerarOcorrenciasMensais(dadosCarregados.contasPagar),
+          const dadosOriginais = atual.data();
+          const carregados = normalizarDadosFinanceiros(dadosOriginais);
+          const gerados = {
+            ...carregados,
+            receitas: gerarOcorrenciasMensais(carregados.receitas),
+            despesas: gerarDespesasFixas(
+              gerarOcorrenciasMensais(carregados.despesas)
+            ),
+            contasPagar: gerarOcorrenciasMensais(carregados.contasPagar),
           };
+          const colecoesAusentes = [
+            "receitas",
+            "despesas",
+            "contasPagar",
+            "contasReceber",
+            "orcamentos",
+          ].some((campo) => !Array.isArray(dadosOriginais[campo]));
+          const reservaAusente =
+            !dadosOriginais.reservaEmergencia ||
+            typeof dadosOriginais.reservaEmergencia !== "object";
 
           if (
-            dados.receitas.length !== dadosCarregados.receitas.length ||
-            dados.despesas.length !== dadosCarregados.despesas.length ||
-            dados.contasPagar.length !== dadosCarregados.contasPagar.length ||
-            !dadosOriginais.reservaEmergencia ||
-            typeof dadosOriginais.reservaEmergencia !== "object"
+            colecoesAusentes ||
+            reservaAusente ||
+            !financialValuesEqual(carregados, gerados)
           ) {
-            await setDoc(referencia, {
-              ...dados,
+            transacao.set(referencia, {
+              ...dadosOriginais,
+              ...gerados,
               updatedAt: serverTimestamp(),
-            });
+            }, { merge: true });
           }
+
+          return gerados;
+        });
+
+        if (!active) return;
+        const novoBase = normalizarDadosFinanceiros(dadosRemotos);
+        const baseAtual = baseFinancialDataRef.current;
+        const localAtual = financialDataRef.current;
+
+        if (baseAtual && !financialValuesEqual(localAtual, baseAtual)) {
+          const rebaseado = mergeFinancialData(baseAtual, localAtual, novoBase);
+          baseFinancialDataRef.current = novoBase;
+          aplicarDados(rebaseado);
+          setRemoteRevision((revision) => revision + 1);
         } else {
-          dados = normalizarDadosFinanceiros();
-          await setDoc(referencia, {
-            ...dados,
-            updatedAt: serverTimestamp(),
-          });
+          baseFinancialDataRef.current = novoBase;
+          aplicarDados(novoBase);
         }
 
-        if (!active) return;
-
-        salvarCacheFinanceiro(userId, dados);
-        aplicarDados(dados);
+        setDataLoadingError("");
+        setSyncError("");
         setSyncStatus("synced");
-      } catch (error) {
+      } catch (erro) {
         if (!active) return;
-
-        const dadosEmCache = carregarCacheFinanceiro(userId);
-        if (dadosEmCache) {
-          aplicarDados(dadosEmCache);
-          setDataLoadingError("");
+        firestoreReadyRef.current = false;
+        const cache = carregarCacheFinanceiro(userId);
+        if (cache && !baseFinancialDataRef.current) {
+          aplicarDados(cache, false);
           setSyncStatus("error");
           setSyncError("Firestore indisponível. Exibindo o cache deste usuário.");
         } else {
-          setDataLoadingError(error.message || "Erro ao carregar seus dados.");
+          setDataLoadingError(erro.message || "Erro ao sincronizar seus dados.");
           setSyncStatus("error");
           setSyncError("Não foi possível acessar os dados no Firestore.");
         }
       }
     }
 
-    carregarDadosDaConta();
+    processSnapshotRef.current = processarSnapshot;
+    const unsubscribe = onSnapshot(
+      referencia,
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (!active) return;
+        if (firestoreWriteInProgressRef.current) {
+          pendingSnapshotRef.current = snapshot;
+          return;
+        }
+        if (snapshot.metadata.fromCache) {
+          if (!cacheFallbackShown && !baseFinancialDataRef.current) {
+            cacheFallbackShown = true;
+            const cache = carregarCacheFinanceiro(userId);
+            if (cache) {
+              aplicarDados(cache, false);
+              setSyncStatus("error");
+              setSyncError("Aguardando conexão com o Firestore; exibindo cache local.");
+            }
+          }
+          return;
+        }
+        void processarSnapshot(snapshot);
+      },
+      (erro) => {
+        if (!active) return;
+        firestoreReadyRef.current = false;
+        const cache = carregarCacheFinanceiro(userId);
+        if (cache && !baseFinancialDataRef.current) {
+          aplicarDados(cache, false);
+          setSyncStatus("error");
+          setSyncError("Firestore indisponível. Exibindo o cache deste usuário.");
+        } else {
+          setDataLoadingError(erro.message || "Erro ao acompanhar o Firestore.");
+          setSyncStatus("error");
+          setSyncError("A sincronização em tempo real falhou.");
+        }
+      }
+    );
 
     return () => {
       active = false;
+      unsubscribe();
+      if (processSnapshotRef.current === processarSnapshot) {
+        processSnapshotRef.current = null;
+      }
     };
   }, [user?.uid, loadAttempt]);
 
@@ -391,24 +494,85 @@ function App() {
     });
     salvarCacheFinanceiro(userId, dados);
 
+    if (
+      !firestoreReadyRef.current ||
+      !baseFinancialDataRef.current ||
+      financialValuesEqual(dados, baseFinancialDataRef.current)
+    ) {
+      return undefined;
+    }
+
     const timer = window.setTimeout(() => {
+      if (firestoreWriteInProgressRef.current) {
+        setRemoteRevision((revision) => revision + 1);
+        return;
+      }
+
       setSyncStatus("syncing");
       setSyncError("");
-      saveQueue.current = saveQueue.current
-        .catch(() => {})
-        .then(async () => {
-          await setDoc(doc(db, "financial_data", userId), {
-            ...dados,
+      firestoreWriteInProgressRef.current = true;
+      const base = baseFinancialDataRef.current;
+
+      runTransaction(db, async (transacao) => {
+        const atual = await transacao.get(doc(db, "financial_data", userId));
+        const dadosAtuais = atual.exists()
+          ? normalizarDadosFinanceiros(atual.data())
+          : normalizarDadosFinanceiros();
+        const merged = mergeFinancialData(base, dados, dadosAtuais);
+
+        if (!financialValuesEqual(merged, dadosAtuais)) {
+          transacao.set(doc(db, "financial_data", userId), {
+            ...(atual.exists() ? atual.data() : {}),
+            ...merged,
             updatedAt: serverTimestamp(),
-          });
+          }, { merge: true });
+        }
+
+        return merged;
+      })
+        .then((merged) => {
+          if (!active) return;
+          const normalizados = normalizarDadosFinanceiros(merged);
+          baseFinancialDataRef.current = normalizados;
+          salvarCacheFinanceiro(userId, normalizados);
+
+          if (financialValuesEqual(financialDataRef.current, dados)) {
+            setReceitas(normalizados.receitas);
+            setDespesas(normalizados.despesas);
+            setContasPagar(normalizados.contasPagar);
+            setContasReceber(normalizados.contasReceber);
+            setReservaEmergencia(normalizados.reservaEmergencia);
+            setFormMetaReserva(
+              normalizados.reservaEmergencia.meta === null
+                ? ""
+                : String(normalizados.reservaEmergencia.meta)
+            );
+            setOrcamentos(normalizados.orcamentos);
+          } else {
+            setRemoteRevision((revision) => revision + 1);
+          }
+
+          setSyncStatus("synced");
         })
-        .then(() => {
-          if (active) setSyncStatus("synced");
-        })
-        .catch((error) => {
+        .catch((erro) => {
           if (!active) return;
           setSyncStatus("error");
-          setSyncError(error.message || "Não foi possível sincronizar.");
+          setSyncError(erro.message || "Não foi possível sincronizar.");
+        })
+        .finally(() => {
+          firestoreWriteInProgressRef.current = false;
+          const snapshot = pendingSnapshotRef.current;
+          pendingSnapshotRef.current = null;
+          if (snapshot && processSnapshotRef.current) {
+            void processSnapshotRef.current(snapshot);
+          }
+          if (
+            active &&
+            baseFinancialDataRef.current &&
+            !financialValuesEqual(financialDataRef.current, baseFinancialDataRef.current)
+          ) {
+            setRemoteRevision((revision) => revision + 1);
+          }
         });
     }, 500);
 
@@ -426,12 +590,8 @@ function App() {
     contasReceber,
     orcamentos,
     reservaEmergencia,
+    remoteRevision,
   ]);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", tema);
-    localStorage.setItem("controle-financeiro-tema", tema);
-  }, [tema]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1042,15 +1202,57 @@ function App() {
     const lancamentoAtual = lista.find((item) => item.id === idEdicao);
     const lancamentoBase = {
       ...(lancamentoAtual || {}),
-      id: idEdicao || Date.now(),
+      id: idEdicao || criarIdFinanceiro(),
+      ...(!lancamentoAtual ? { criadoEm: new Date().toISOString() } : {}),
       tipo,
       ...formulario,
     };
-    const lancamento = aplicarMetadadosRecorrencia({
-      lancamento: lancamentoBase,
-      formulario,
-      lancamentoAtual,
-    });
+
+    if (tipo === "despesa" && lancamentoAtual?.despesaFixa) {
+      try {
+        const despesasAtualizadas = editarDespesaFixa(
+          lista,
+          idEdicao,
+          formulario,
+          escopoEdicaoDespesaFixa || "somente-este"
+        );
+        setLista(despesasAtualizadas);
+      } catch (erro) {
+        window.alert(erro.message);
+        return;
+      }
+
+      setIdEdicao(null);
+      setEscopoEdicaoDespesaFixa("");
+      setFormulario({
+        ...lancamentoInicial,
+        recorrente: false,
+        despesaFixa: false,
+        tipoDespesaFixa: "continua",
+        quantidadeParcelas: "",
+      });
+      return;
+    }
+
+    let lancamento;
+    if (tipo === "despesa" && formulario.despesaFixa && !idEdicao) {
+      try {
+        lancamento = criarDespesaFixa({
+          lancamento: lancamentoBase,
+          forma: formulario.tipoDespesaFixa,
+          quantidadeParcelas: formulario.quantidadeParcelas,
+        });
+      } catch (erro) {
+        window.alert(erro.message);
+        return;
+      }
+    } else {
+      lancamento = aplicarMetadadosRecorrencia({
+        lancamento: lancamentoBase,
+        formulario,
+        lancamentoAtual,
+      });
+    }
 
     if (idEdicao) {
       setLista((listaAnterior) =>
@@ -1060,13 +1262,25 @@ function App() {
       );
       setIdEdicao(null);
     } else {
-      setLista((listaAnterior) => [...listaAnterior, lancamento]);
+      setLista((listaAnterior) => {
+        const listaAtualizada = [...listaAnterior, lancamento];
+        return tipo === "despesa" && lancamento.despesaFixa
+          ? gerarDespesasFixas(listaAtualizada)
+          : listaAtualizada;
+      });
     }
 
     setFormulario({
       ...lancamentoInicial,
       ...(tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar"
         ? { recorrente: false }
+        : {}),
+      ...(tipo === "despesa"
+        ? {
+            despesaFixa: false,
+            tipoDespesaFixa: "continua",
+            quantidadeParcelas: "",
+          }
         : {}),
       status:
         tipo === "conta-pagar"
@@ -1102,6 +1316,38 @@ function App() {
           ? "pendente"
           : "pago",
     });
+  }
+
+  function solicitarEdicaoDespesaFixa(item) {
+    setDespesaFixaParaEditar(item);
+  }
+
+  function cancelarDespesaFixa(serieId) {
+    if (!window.confirm("Cancelar as próximas ocorrências desta despesa fixa?")) {
+      return;
+    }
+
+    const hoje = new Date().toISOString().slice(0, 10);
+    setDespesas((lista) =>
+      cancelarSerieDespesa(
+        lista.filter(
+          (item) =>
+            item.serieId !== serieId ||
+            item.serieOrigem ||
+            item.status === "pago" ||
+            item.data <= hoje
+        ),
+        serieId
+      )
+    );
+  }
+
+  function excluirDespesaFixa(serieId) {
+    if (!window.confirm("Excluir todos os lançamentos desta série?")) {
+      return;
+    }
+
+    setDespesas((lista) => lista.filter((item) => item.serieId !== serieId));
   }
 
   function excluirItem(setLista, id) {
@@ -1146,7 +1392,7 @@ function App() {
     }
 
     const orcamento = {
-      id: edicaoOrcamentoId || Date.now(),
+      id: edicaoOrcamentoId || criarIdFinanceiro(),
       categoria: formOrcamento.categoria.trim(),
       valor: Number(formOrcamento.valor),
       ano: formOrcamento.ano,
@@ -1604,6 +1850,16 @@ function App() {
     textoBotao,
     textoBotaoEditar,
   }) {
+    const editandoDespesaFixa =
+      tipo === "despesa" && Boolean(idEdicao) && formulario.despesaFixa;
+    const valorDespesaLabel = editandoDespesaFixa && escopoEdicaoDespesaFixa === "somente-este"
+      ? "Valor deste lançamento"
+      : tipo === "despesa" && formulario.despesaFixa && formulario.tipoDespesaFixa === "parcelada"
+        ? editandoDespesaFixa
+          ? "Total das parcelas restantes"
+          : "Valor total"
+        : "Valor";
+
     return (
       <section className="panel form-panel">
         <div className="section-heading">
@@ -1649,8 +1905,15 @@ function App() {
             </div>
 
             <div className="form-field">
-              <label>Valor</label>
+              <label>{tipo === "despesa" ? valorDespesaLabel : "Valor"}</label>
               <input
+                id={
+                  tipo === "despesa" &&
+                  formulario.despesaFixa &&
+                  formulario.tipoDespesaFixa === "parcelada"
+                    ? "despesa-fixa-total"
+                    : undefined
+                }
                 name="valor"
                 type="number"
                 min="0"
@@ -1671,6 +1934,88 @@ function App() {
               />
             </div>
 
+            {tipo === "despesa" && (
+              <div className="fixed-expense-control form-field">
+                <label className="fixed-expense-toggle">
+                  <input
+                    type="checkbox"
+                    checked={formulario.despesaFixa === true}
+                    disabled={Boolean(idEdicao && formulario.despesaFixa)}
+                    onChange={(evento) =>
+                      setFormulario((anterior) => ({
+                        ...anterior,
+                        despesaFixa: evento.target.checked,
+                        recorrente: evento.target.checked ? false : anterior.recorrente,
+                      }))
+                    }
+                  />
+                  <span>Despesa fixa</span>
+                </label>
+                {formulario.despesaFixa && (
+                  <div className="fixed-expense-options">
+                    <strong>Forma da despesa fixa</strong>
+                    <label className="fixed-expense-radio">
+                      <input
+                        type="radio"
+                        name="tipoDespesaFixa"
+                        value="continua"
+                        checked={formulario.tipoDespesaFixa === "continua"}
+                        onChange={(evento) =>
+                          setFormulario((anterior) => ({
+                            ...anterior,
+                            tipoDespesaFixa: evento.target.value,
+                            quantidadeParcelas: "",
+                          }))
+                        }
+                      />
+                      <span>Sem parcelamento</span>
+                    </label>
+                    <label className="fixed-expense-radio">
+                      <input
+                        type="radio"
+                        name="tipoDespesaFixa"
+                        value="parcelada"
+                        checked={formulario.tipoDespesaFixa === "parcelada"}
+                        onChange={(evento) =>
+                          setFormulario((anterior) => ({
+                            ...anterior,
+                            tipoDespesaFixa: evento.target.value,
+                          }))
+                        }
+                      />
+                      <span>Parcelada</span>
+                    </label>
+                    {formulario.tipoDespesaFixa === "parcelada" && (
+                      <>
+                        <p className="fixed-expense-help">
+                          {editandoDespesaFixa && escopoEdicaoDespesaFixa === "este-e-os-proximos"
+                            ? "Informe o total a partir desta parcela; lançamentos pagos anteriores serão preservados."
+                            : editandoDespesaFixa
+                              ? "Este valor altera somente o lançamento selecionado."
+                              : "O total será dividido entre as parcelas; centavos restantes serão ajustados na última."}
+                        </p>
+                        <label htmlFor="despesa-fixa-parcelas">
+                          {editandoDespesaFixa && escopoEdicaoDespesaFixa === "este-e-os-proximos"
+                            ? "Parcelas restantes"
+                            : "Quantidade de parcelas"}
+                        </label>
+                        <input
+                          id="despesa-fixa-parcelas"
+                          name="quantidadeParcelas"
+                          type="number"
+                          min="1"
+                          step="1"
+                          required
+                          value={formulario.quantidadeParcelas}
+                          onChange={alterarFormulario(setFormulario)}
+                        />
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="form-field">
               <label>Status</label>
               <select
@@ -1684,7 +2029,7 @@ function App() {
             </div>
           </div>
 
-          {(tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar") && (
+          {(tipo === "receita" || tipo === "conta-pagar" || (tipo === "despesa" && !formulario.despesaFixa)) && (
             <div className="recurrence-option">
               <label className="recurrence-toggle" htmlFor={`recorrente-${tipo}`}>
                 <input
@@ -1842,7 +2187,14 @@ function App() {
       ...despesas.map((item) => ({ ...item, origem: "Despesa" })),
       ...contasPagar.map((item) => ({ ...item, origem: "Conta a pagar" })),
     ]
-      .sort((a, b) => b.id - a.id)
+      .sort((a, b) => {
+        const momento = (item) => Math.max(
+          Number(item.id) || 0,
+          Date.parse(item.criadoEm || "") || 0,
+          Date.parse(`${item.data || ""}T12:00:00`) || 0
+        );
+        return momento(b) - momento(a);
+      })
       .slice(0, 5);
 
     function renderDashboardAlerts() {
@@ -2812,6 +3164,236 @@ function App() {
     );
   }
 
+  function iniciarEdicaoDespesaFixa(escopo) {
+    const item = despesaFixaParaEditar;
+    if (!item) return;
+
+    const origem = despesas.find(
+      (despesa) => despesa.serieId === item.serieId && despesa.serieOrigem
+    );
+    if (!origem) return;
+
+    const parcela = Number(item.parcelaAtual) || 1;
+    const inicioParcela = item.status === "pago" ? parcela + 1 : parcela;
+    const quantidadeRestante = origem.tipoDespesaFixa === "parcelada"
+      ? Math.max(Number(origem.quantidadeParcelas) - inicioParcela + 1, 0)
+      : "";
+    const totalAnterior = despesas
+      .filter(
+        (despesa) =>
+          despesa.serieId === item.serieId &&
+          Number(despesa.parcelaAtual) > 0 &&
+          Number(despesa.parcelaAtual) < inicioParcela
+      )
+      .reduce((total, despesa) => total + Math.round(Number(despesa.valor || 0) * 100), 0);
+    const totalRestante = Math.max(
+      Math.round(Number(origem.valorTotal || 0) * 100) - totalAnterior,
+      0
+    );
+
+    setEscopoEdicaoDespesaFixa(escopo);
+    setFormDespesa({
+      ...lancamentoInicial,
+      descricao: item.descricaoBase || origem.descricaoBase || item.descricao,
+      categoria: item.categoria || origem.categoria || "",
+      valor:
+        escopo === "este-e-os-proximos" && origem.tipoDespesaFixa === "parcelada"
+          ? (totalRestante / 100).toFixed(2)
+          : escopo === "este-e-os-proximos"
+            ? String(origem.valorParcela)
+            : String(item.valor),
+      data: item.data,
+      status: item.status || "pendente",
+      observacoes: item.observacoes || origem.observacoes || "",
+      recorrente: false,
+      despesaFixa: true,
+      tipoDespesaFixa: origem.tipoDespesaFixa,
+      quantidadeParcelas:
+        escopo === "este-e-os-proximos" && origem.tipoDespesaFixa === "parcelada"
+          ? String(quantidadeRestante)
+          : String(origem.quantidadeParcelas || ""),
+    });
+    setEdicaoDespesaId(item.id);
+    setDespesaFixaParaEditar(null);
+    setPagina("despesas");
+  }
+
+  function renderDespesasFixas() {
+    const origens = despesas.filter(
+      (item) => item.despesaFixa === true && item.serieOrigem === true
+    );
+
+    function proximaData(serie, itens) {
+      if (!serie.serieAtiva) return "Cancelada";
+      if (
+        serie.tipoDespesaFixa === "parcelada" &&
+        Math.max(...itens.map((item) => Number(item.parcelaAtual) || 0)) >= Number(serie.quantidadeParcelas)
+      ) {
+        return "Concluída";
+      }
+
+      const hoje = new Date().toISOString().slice(0, 10);
+      const proximaPendente = itens
+        .filter((item) => item.status !== "pago" && item.data >= hoje)
+        .sort((a, b) => a.data.localeCompare(b.data))[0];
+      if (proximaPendente) return formatarData(proximaPendente.data);
+
+      const competenciaAtual = new Date();
+      const ultimaData = itens.reduce(
+        (ultima, item) => item.data > ultima ? item.data : ultima,
+        serie.dataInicio || serie.data
+      );
+      const base = ultimaData.slice(0, 7) < `${competenciaAtual.getFullYear()}-${String(competenciaAtual.getMonth() + 1).padStart(2, "0")}`
+        ? competenciaAtual
+        : new Date(`${ultimaData}T12:00:00`);
+      const ano = base.getMonth() === 11 ? base.getFullYear() + 1 : base.getFullYear();
+      const mes = (base.getMonth() + 1) % 12;
+      const dia = Number(serie.diaVencimento) || 1;
+      const vencimento = new Date(ano, mes + 1, 0).getDate();
+      return formatarData(`${ano}-${String(mes + 1).padStart(2, "0")}-${String(Math.min(dia, vencimento)).padStart(2, "0")}`);
+    }
+
+    return (
+      <section className="panel fixed-expenses-panel">
+        <div className="section-heading">
+          <div>
+            <p className="subtitle">Séries financeiras</p>
+            <h2>Despesas Fixas</h2>
+          </div>
+          <strong>{origens.length} séries</strong>
+        </div>
+
+        {origens.length === 0 ? (
+          <div className="empty-state">
+            <strong>Nenhuma despesa fixa cadastrada</strong>
+            <p>Ative “Despesa fixa” no formulário para criar uma série mensal.</p>
+          </div>
+        ) : (
+          <div className="fixed-expense-list">
+            {origens.map((serie) => {
+              const itens = despesas.filter((item) => item.serieId === serie.serieId);
+              const ultimaParcela = Math.max(...itens.map((item) => Number(item.parcelaAtual) || 0));
+              const competenciaAtual = new Date().toISOString().slice(0, 7);
+              const ocorrenciaAtual = itens.find(
+                (item) => (item.competencia || item.data?.slice(0, 7)) === competenciaAtual
+              ) || [...itens].sort((a, b) => (b.data || "").localeCompare(a.data || ""))[0];
+              const progresso = serie.tipoDespesaFixa === "parcelada"
+                ? Math.min((ultimaParcela / Number(serie.quantidadeParcelas || 1)) * 100, 100)
+                : 0;
+
+              return (
+                <article className="fixed-expense-row" key={serie.serieId}>
+                  <div className="fixed-expense-summary">
+                    <strong>{serie.descricaoBase || serie.descricao}</strong>
+                    <span>
+                      {formatarValor(serie.valorParcela ?? serie.valor)} / mês
+                      {serie.tipoDespesaFixa === "parcelada" &&
+                        ` · ${ultimaParcela} de ${serie.quantidadeParcelas} parcelas`}
+                    </span>
+                    {serie.tipoDespesaFixa === "parcelada" && (
+                      <div className="fixed-expense-progress">
+                        <div style={{ width: `${progresso}%` }} />
+                      </div>
+                    )}
+                  </div>
+                  <span className="fixed-expense-type">
+                    {serie.tipoDespesaFixa === "parcelada" ? "Parcelada" : "Contínua"}
+                  </span>
+                  <span className="fixed-expense-next">
+                    Próxima: {proximaData(serie, itens)}
+                  </span>
+                  <div className="fixed-expense-status">
+                    <span className={`status ${serie.serieAtiva === false ? "cancelada" : ocorrenciaAtual?.status || "pendente"}`}>
+                      {serie.serieAtiva === false
+                        ? "Cancelada"
+                        : ocorrenciaAtual?.status === "pago"
+                          ? "Pago"
+                          : "Pendente"}
+                    </span>
+                    {serie.serieAtiva !== false && ocorrenciaAtual && (
+                      <button
+                        className="text-button fixed-expense-status-action"
+                        type="button"
+                        onClick={() => alternarStatus(setDespesas, ocorrenciaAtual.id)}
+                      >
+                        {ocorrenciaAtual.status === "pago" ? "Reabrir" : "Marcar paga"}
+                      </button>
+                    )}
+                  </div>
+                  <div className="fixed-expense-actions">
+                    <button
+                      className="secondary-button small-button"
+                      type="button"
+                      onClick={() => solicitarEdicaoDespesaFixa(serie)}
+                    >
+                      Editar
+                    </button>
+                    {serie.serieAtiva !== false && (
+                      <button
+                        className="secondary-button small-button"
+                        type="button"
+                        onClick={() => cancelarDespesaFixa(serie.serieId)}
+                      >
+                        Cancelar série
+                      </button>
+                    )}
+                    <button
+                      className="delete-button small-button"
+                      type="button"
+                      onClick={() => excluirDespesaFixa(serie.serieId)}
+                    >
+                      Excluir
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+
+        {despesaFixaParaEditar && (
+          <div className="fixed-edit-overlay">
+            <section
+              className="fixed-edit-dialog"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="fixed-edit-title"
+            >
+              <p className="subtitle">Editar série</p>
+              <h3 id="fixed-edit-title">
+                {despesaFixaParaEditar.descricaoBase || despesaFixaParaEditar.descricao}
+              </h3>
+              <p>Escolha quais lançamentos serão atualizados.</p>
+              <div className="fixed-edit-options">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => iniciarEdicaoDespesaFixa("somente-este")}
+                >
+                  Alterar somente este lançamento
+                </button>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => iniciarEdicaoDespesaFixa("este-e-os-proximos")}
+                >
+                  Alterar este e os próximos
+                </button>
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => setDespesaFixaParaEditar(null)}
+                >
+                  Voltar
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
+      </section>
+    );
+  }
+
   function renderizarPagina() {
     if (pagina === "receitas") {
       return (
@@ -2878,9 +3460,9 @@ function App() {
           })}
 
           {renderLista({
-            titulo: "Despesas cadastradas",
-            subtitulo: "Histórico",
-            lista: despesas,
+            titulo: "Despesas do mês",
+            subtitulo: "Lançamentos avulsos",
+            lista: despesas.filter((item) => item.despesaFixa !== true),
             setLista: setDespesas,
             onEditar: (item) =>
               iniciarEdicaoLancamento(
@@ -2889,6 +3471,8 @@ function App() {
                 setEdicaoDespesaId
               ),
           })}
+
+          {renderDespesasFixas()}
         </>
       );
     }
@@ -2995,7 +3579,7 @@ function App() {
   }
 
   return (
-    <div className={`app theme-${tema}`}>
+    <div className="app">
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-logo">CF</div>
@@ -3022,23 +3606,6 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div className="theme-switcher">
-            <span className="theme-title">Tema visual</span>
-            <div className="theme-options">
-              {temas.map((opcao) => (
-                <button
-                  key={opcao.id}
-                  type="button"
-                  className={tema === opcao.id ? "active" : ""}
-                  onClick={() => setTema(opcao.id)}
-                >
-                  {opcao.label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <strong>Versão 1.0</strong>
           <div className="account-panel">
             <span className="account-email" title={user.email || ""}>
               {user.email}

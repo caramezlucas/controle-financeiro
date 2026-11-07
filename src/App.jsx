@@ -24,6 +24,10 @@ import {
 import "./App.css";
 import AuthScreen from "./AuthScreen.jsx";
 import { auth, db } from "./firebase.js";
+import {
+  aplicarMetadadosRecorrencia,
+  gerarOcorrenciasMensais,
+} from "./lib/recurrence.js";
 
 const meses = [
   "Janeiro",
@@ -204,11 +208,18 @@ function App() {
   const [contasPagar, setContasPagar] = useState([]);
   const [contasReceber, setContasReceber] = useState([]);
 
-  const [formReceita, setFormReceita] = useState(lancamentoInicial);
-  const [formDespesa, setFormDespesa] = useState(lancamentoInicial);
+  const [formReceita, setFormReceita] = useState({
+    ...lancamentoInicial,
+    recorrente: false,
+  });
+  const [formDespesa, setFormDespesa] = useState({
+    ...lancamentoInicial,
+    recorrente: false,
+  });
   const [formPagar, setFormPagar] = useState({
     ...lancamentoInicial,
     status: "pendente",
+    recorrente: false,
   });
   const [formReceber, setFormReceber] = useState({
     ...lancamentoInicial,
@@ -284,7 +295,24 @@ function App() {
 
         let dados;
         if (registro.exists()) {
-          dados = normalizarDadosFinanceiros(registro.data());
+          const dadosCarregados = normalizarDadosFinanceiros(registro.data());
+          dados = {
+            ...dadosCarregados,
+            receitas: gerarOcorrenciasMensais(dadosCarregados.receitas),
+            despesas: gerarOcorrenciasMensais(dadosCarregados.despesas),
+            contasPagar: gerarOcorrenciasMensais(dadosCarregados.contasPagar),
+          };
+
+          if (
+            dados.receitas.length !== dadosCarregados.receitas.length ||
+            dados.despesas.length !== dadosCarregados.despesas.length ||
+            dados.contasPagar.length !== dadosCarregados.contasPagar.length
+          ) {
+            await setDoc(referencia, {
+              ...dados,
+              updatedAt: serverTimestamp(),
+            });
+          }
         } else {
           dados = normalizarDadosFinanceiros();
           await setDoc(referencia, {
@@ -996,6 +1024,7 @@ function App() {
   function salvarLancamento({
     evento,
     formulario,
+    lista,
     setLista,
     setFormulario,
     idEdicao,
@@ -1014,11 +1043,27 @@ function App() {
       return;
     }
 
-    const lancamento = {
+    if (
+      (tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar") &&
+      formulario.recorrente &&
+      !formulario.data
+    ) {
+      alert("Informe a data do lançamento recorrente.");
+      return;
+    }
+
+    const lancamentoAtual = lista.find((item) => item.id === idEdicao);
+    const lancamentoBase = {
+      ...(lancamentoAtual || {}),
       id: idEdicao || Date.now(),
       tipo,
       ...formulario,
     };
+    const lancamento = aplicarMetadadosRecorrencia({
+      lancamento: lancamentoBase,
+      formulario,
+      lancamentoAtual,
+    });
 
     if (idEdicao) {
       setLista((listaAnterior) =>
@@ -1033,6 +1078,9 @@ function App() {
 
     setFormulario({
       ...lancamentoInicial,
+      ...(tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar"
+        ? { recorrente: false }
+        : {}),
       status:
         tipo === "conta-pagar" || tipo === "conta-receber"
           ? "pendente"
@@ -1048,6 +1096,9 @@ function App() {
       data: item.data || new Date().toISOString().slice(0, 10),
       status: item.status || "pago",
       observacoes: item.observacoes || "",
+      ...(item.tipo === "receita" || item.tipo === "despesa" || item.tipo === "conta-pagar"
+        ? { recorrente: item.recorrente === true }
+        : {}),
     });
     setIdEdicao(item.id);
   }
@@ -1056,6 +1107,9 @@ function App() {
     setIdEdicao(null);
     setFormulario({
       ...lancamentoInicial,
+      ...(tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar"
+        ? { recorrente: false }
+        : {}),
       status:
         tipo === "conta-pagar" || tipo === "conta-receber"
           ? "pendente"
@@ -1515,6 +1569,7 @@ function App() {
     titulo,
     subtitulo,
     formulario,
+    lista,
     setFormulario,
     setLista,
     idEdicao,
@@ -1537,6 +1592,7 @@ function App() {
             salvarLancamento({
               evento,
               formulario,
+              lista,
               setLista,
               setFormulario,
               idEdicao,
@@ -1601,6 +1657,40 @@ function App() {
               </select>
             </div>
           </div>
+
+          {(tipo === "receita" || tipo === "despesa" || tipo === "conta-pagar") && (
+            <div className="recurrence-option">
+              <label className="recurrence-toggle" htmlFor={`recorrente-${tipo}`}>
+                <input
+                  id={`recorrente-${tipo}`}
+                  type="checkbox"
+                  checked={formulario.recorrente === true}
+                  onChange={(evento) =>
+                    setFormulario((anterior) => ({
+                      ...anterior,
+                      recorrente: evento.target.checked,
+                    }))
+                  }
+                />
+                <span>
+                  {tipo === "receita"
+                    ? "Receita recorrente"
+                    : tipo === "despesa"
+                      ? "Despesa recorrente"
+                      : "Conta recorrente"}
+                </span>
+              </label>
+              {formulario.recorrente && (
+                <p>
+                  {tipo === "receita"
+                    ? "Esta receita será lançada automaticamente todos os meses."
+                    : tipo === "despesa"
+                      ? "Esta despesa será lançada automaticamente todos os meses."
+                      : "Esta conta será lançada automaticamente todos os meses."}
+                </p>
+              )}
+            </div>
+          )}
 
           <div className="form-field textarea-field">
             <label>Observações</label>
@@ -2475,6 +2565,7 @@ function App() {
             titulo: "Cadastrar receita",
             subtitulo: "Novo lançamento",
             formulario: formReceita,
+            lista: receitas,
             setFormulario: setFormReceita,
             setLista: setReceitas,
             idEdicao: edicaoReceitaId,
@@ -2514,6 +2605,7 @@ function App() {
             titulo: "Cadastrar despesa",
             subtitulo: "Novo lançamento",
             formulario: formDespesa,
+            lista: despesas,
             setFormulario: setFormDespesa,
             setLista: setDespesas,
             idEdicao: edicaoDespesaId,
@@ -2553,6 +2645,7 @@ function App() {
             titulo: "Cadastrar conta",
             subtitulo: "Nova obrigação",
             formulario: formPagar,
+            lista: contasPagar,
             setFormulario: setFormPagar,
             setLista: setContasPagar,
             idEdicao: edicaoPagarId,
@@ -2592,6 +2685,7 @@ function App() {
             titulo: "Cadastrar recebimento",
             subtitulo: "Nova previsão",
             formulario: formReceber,
+            lista: contasReceber,
             setFormulario: setFormReceber,
             setLista: setContasReceber,
             idEdicao: edicaoReceberId,

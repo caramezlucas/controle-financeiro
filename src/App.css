@@ -554,6 +554,37 @@ textarea {
   gap: 14px;
 }
 
+.recurrence-option {
+  margin-top: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.recurrence-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.recurrence-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--brand);
+}
+
+.recurrence-option p {
+  margin: 8px 0 0 28px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .form-button {
   margin-top: 16px;
 }
